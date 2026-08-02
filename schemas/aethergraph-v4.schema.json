@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Apocky/aethergraph/blob/main/schemas/aethergraph-v4.schema.json",
+  "title": "Aethergraph v4 synthesized payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "observed_at", "counts", "legend", "nodes", "edge_fields",
+    "facet_vocab", "reason_vocab", "presentation_vocab", "explicit", "latent",
+    "ghosts", "severed", "synthesis"
+  ],
+  "properties": {
+    "schema": { "const": "aethergraph.v4" },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "legend": { "type": "object" },
+    "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+    "edge_fields": {
+      "const": ["a", "b", "weight", "facet", "reach", "span", "facet_gap", "relevance", "reason", "signals", "presentation"]
+    },
+    "facet_vocab": { "$ref": "aethergraph-v3.schema.json#/$defs/vocabulary" },
+    "reason_vocab": {
+      "type": "array",
+      "items": { "oneOf": [
+        { "type": "string" },
+        { "$ref": "aethergraph-v3.schema.json#/$defs/reason" }
+      ] }
+    },
+    "presentation_vocab": { "const": ["primary", "context", "archive"] },
+    "explicit": { "$ref": "aethergraph-v3.schema.json#/$defs/edges" },
+    "latent": { "$ref": "aethergraph-v3.schema.json#/$defs/edges" },
+    "ghosts": { "type": "array", "items": { "$ref": "aethergraph-v3.schema.json#/$defs/ghost" } },
+    "severed": { "type": "array", "items": { "$ref": "aethergraph-v3.schema.json#/$defs/severed" } },
+    "synthesis": { "$ref": "#/$defs/synthesis" }
+  },
+  "$defs": {
+    "stringArray": { "type": "array", "items": { "type": "string" } },
+    "nullableString": { "type": ["string", "null"] },
+    "score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "pair": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "prefixItems": [{ "type": "string" }, { "$ref": "#/$defs/score" }]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "display_title", "display_title_source", "label_source",
+        "topics", "display_tags", "path", "type", "project", "area", "label_area",
+        "role", "facets", "tags", "aliases", "evidence", "privacy",
+        "withhold_from_telemetry", "authority", "source_path", "source_sha256",
+        "source_commit", "source_tree_dirty", "hand_authored", "standing",
+        "standing_parts", "corroboration", "load", "contested", "authority_rank",
+        "hybridity", "family", "view_scope", "mass", "age", "description", "synthesis"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "display_title": { "type": "string" },
+        "display_title_source": { "type": "string" },
+        "label_source": { "type": "string" },
+        "topics": { "$ref": "#/$defs/stringArray" },
+        "display_tags": { "$ref": "#/$defs/stringArray" },
+        "path": { "type": "string" },
+        "type": { "$ref": "#/$defs/nullableString" },
+        "project": { "$ref": "#/$defs/nullableString" },
+        "area": { "$ref": "#/$defs/nullableString" },
+        "label_area": { "$ref": "#/$defs/nullableString" },
+        "role": { "$ref": "#/$defs/nullableString" },
+        "facets": { "$ref": "#/$defs/stringArray" },
+        "tags": { "$ref": "#/$defs/stringArray" },
+        "aliases": { "$ref": "#/$defs/stringArray" },
+        "evidence": { "type": "string" },
+        "privacy": { "type": "string", "minLength": 1 },
+        "withhold_from_telemetry": { "type": "boolean" },
+        "authority": { "$ref": "#/$defs/nullableString" },
+        "source_path": { "$ref": "#/$defs/nullableString" },
+        "source_sha256": { "$ref": "#/$defs/nullableString" },
+        "source_commit": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^(?:[0-9a-fA-F]{7,64}|unavailable-not-a-git-repository)$" }
+          ]
+        },
+        "source_tree_dirty": { "type": ["boolean", "null"] },
+        "hand_authored": { "type": "boolean" },
+        "standing": { "$ref": "#/$defs/score" },
+        "standing_parts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["provenance", "corroboration", "load", "contested"],
+          "properties": {
+            "provenance": { "$ref": "#/$defs/score" },
+            "corroboration": { "type": "integer", "minimum": 0 },
+            "load": { "type": "integer", "minimum": 0 },
+            "contested": { "type": "boolean" }
+          }
+        },
+        "corroboration": { "type": "integer", "minimum": 0 },
+        "load": { "type": "number", "minimum": 0 },
+        "contested": { "type": "boolean" },
+        "authority_rank": { "type": "integer", "minimum": 0 },
+        "hybridity": { "type": "number", "minimum": 0 },
+        "family": { "$ref": "#/$defs/nullableString" },
+        "view_scope": { "enum": ["core", "corpus", "all"] },
+        "mass": { "type": "number", "minimum": 0 },
+        "age": { "type": "number", "minimum": 0 },
+        "description": { "type": "string", "maxLength": 240 },
+        "synthesis": { "$ref": "#/$defs/nodeSynthesis" }
+      }
+    },
+    "nodeSynthesis": {
+      "type": "object", "additionalProperties": false,
+      "required": ["subjects", "contexts", "importance", "utility", "activation", "confidence", "support", "residuals", "region_attribution"],
+      "properties": {
+        "subjects": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/pair" } },
+        "contexts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/pair" } },
+        "importance": {
+          "type": "object", "additionalProperties": false, "required": ["score", "parts"],
+          "properties": { "score": { "$ref": "#/$defs/score" }, "parts": {
+            "type": "object", "additionalProperties": false,
+            "required": ["standing", "load", "authority", "support"],
+            "properties": { "standing": { "$ref": "#/$defs/score" }, "load": { "$ref": "#/$defs/score" }, "authority": { "$ref": "#/$defs/score" }, "support": { "$ref": "#/$defs/score" } }
+          } }
+        },
+        "utility": {
+          "type": "object", "additionalProperties": false, "required": ["score", "frame_ref", "parts"],
+          "properties": { "score": { "$ref": "#/$defs/score" }, "frame_ref": { "type": "string" }, "parts": {
+            "type": "object", "additionalProperties": false, "required": ["direct", "neighbour", "goal"],
+            "properties": { "direct": { "$ref": "#/$defs/score" }, "neighbour": { "$ref": "#/$defs/score" }, "goal": { "$ref": "#/$defs/score" } }
+          } }
+        },
+        "activation": {
+          "type": "object", "additionalProperties": false,
+          "required": ["score", "direct", "propagated", "inhibited"],
+          "properties": { "score": { "$ref": "#/$defs/score" }, "direct": { "$ref": "#/$defs/score" }, "propagated": { "$ref": "#/$defs/score" }, "inhibited": { "$ref": "#/$defs/score" } }
+        },
+        "confidence": {
+          "type": "object", "additionalProperties": false, "required": ["score", "parts"],
+          "properties": { "score": { "$ref": "#/$defs/score" }, "parts": {
+            "type": "object", "additionalProperties": false,
+            "required": ["evidence", "independence", "freshness", "coverage", "residual"],
+            "properties": { "evidence": { "$ref": "#/$defs/score" }, "independence": { "$ref": "#/$defs/score" }, "freshness": { "$ref": "#/$defs/score" }, "coverage": { "$ref": "#/$defs/score" }, "residual": { "$ref": "#/$defs/score" } }
+          } }
+        },
+        "support": {
+          "type": "object", "additionalProperties": false,
+          "required": ["regions", "independent", "lineages"],
+          "properties": { "regions": { "type": "integer", "minimum": 0 }, "independent": { "type": "integer", "minimum": 0 }, "lineages": { "type": "integer", "minimum": 0 } }
+        },
+        "residuals": { "$ref": "#/$defs/stringArray" },
+        "region_attribution": { "type": "array", "items": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "prefixItems": [{ "type": "string" }, { "$ref": "#/$defs/score" }]
+        } }
+      }
+    },
+    "region": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "derivation_family", "observed_at", "source_snapshot_sha256", "status", "activation", "inhibition", "gain", "confidence", "contributions", "omissions"],
+      "properties": {
+        "id": { "type": "string" },
+        "derivation_family": { "type": "string" },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "source_snapshot_sha256": { "$ref": "#/$defs/hash" },
+        "status": { "enum": ["active", "degraded", "inactive"] },
+        "activation": { "$ref": "#/$defs/score" },
+        "inhibition": { "$ref": "#/$defs/score" },
+        "gain": { "$ref": "#/$defs/score" },
+        "confidence": { "$ref": "#/$defs/score" },
+        "contributions": { "type": "integer", "minimum": 0 },
+        "omissions": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "residual": {
+      "type": "object", "additionalProperties": false,
+      "required": ["code", "severity", "nodes", "evidence"],
+      "properties": { "code": { "type": "string" }, "severity": { "$ref": "#/$defs/score" }, "nodes": { "$ref": "#/$defs/stringArray" }, "evidence": { "type": "string" } }
+    },
+    "synthesis": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "frame_ref", "mode", "authority", "base", "algorithm", "regions", "budget", "working_set", "residuals"],
+      "properties": {
+        "schema": { "const": "aethergraph.synthesis.v1" },
+        "frame_ref": { "type": "string" },
+        "mode": { "enum": ["resting", "active"] },
+        "authority": { "const": "none" },
+        "base": {
+          "type": "object", "additionalProperties": false,
+          "required": ["agent_index_sha256", "graph_sha256"],
+          "properties": { "agent_index_sha256": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }, "graph_sha256": { "$ref": "#/$defs/hash" } }
+        },
+        "algorithm": { "const": "holistic-modulator-v1" },
+        "regions": { "type": "array", "items": { "$ref": "#/$defs/region" } },
+        "budget": {
+          "type": "object", "additionalProperties": false,
+          "required": ["node_limit", "edge_limit", "token_estimate_limit", "selected_nodes", "selected_edges"],
+          "properties": {
+            "node_limit": { "type": "integer", "minimum": 1 },
+            "edge_limit": { "type": "integer", "minimum": 1 },
+            "token_estimate_limit": { "type": "integer", "minimum": 1 },
+            "selected_nodes": { "type": "integer", "minimum": 0 },
+            "selected_edges": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "working_set": { "$ref": "#/$defs/stringArray" },
+        "residuals": { "type": "array", "items": { "$ref": "#/$defs/residual" } }
+      }
+    }
+  }
+}

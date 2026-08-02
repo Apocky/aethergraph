@@ -1,0 +1,156 @@
+# § Aethergraph Holistic Memory Synthesis Organ v1
+
+I> status := implemented-live-verified
+I> scope := local read-only synthesis + renderer projection + machine-ingest projection
+I> authority := none
+I> verification := synthetic-shadow + deterministic-runtime + public-boundary
+I> live-vault-visual := verified
+I> external-projection-integration := verified exact-ID + base-hash + source-immutability
+
+## §P purpose
+
+organ := resting synthesis + task-conditioned modulation over independent memory regions
+organ ≠ database | flat merge | truth oracle | autonomous effect surface
+
+W! resting synthesis:
+  renderer graph + exact optional base hashes + typed regional contributions
+  -> validate + isolate providers
+  -> discount older + low-confidence contributions
+  -> deduplicate derivation families + lineage
+  -> preserve contradiction + omission + degradation
+  -> allocate bounded working context
+  -> emit inspectable renderer + AI projections
+
+W! active recall:
+  query + validated v4 renderer
+  -> direct node fit + typed one-hop propagation
+  -> deterministic node budget + node-attributed region recruitment
+  -> transient view state ; N! query text persists
+
+## §D operational dimensions
+
+subject := controlled topic distribution describing document content
+context := typed frame in which document or relation matters
+relevance := query-or-edge-local fit ; N! global property
+importance := query-independent structural/load-bearing score + visible parts ; N! certainty
+utility := actor+goal+criterion+time-scoped expected usefulness ; N! universal value
+activation := current frame participation after excitation + inhibition
+confidence := support quality + independence + freshness - residual penalty ; N! truth
+status := verified-runtime | verified-source | inferred | reported | proposed | unknown | refuted | residual
+
+## §T input contracts
+
+base := renderer graph ⊗ {
+  optional agent_index_sha256,
+  optional graph_sha256,
+  agent-safe document IDs,
+  typed authored/structural relations
+}
+
+provider-source := {
+  schema,
+  provider_id,
+  base hashes,
+  observed_at,
+  authority=read_only|none,
+  status,
+  derivation_family,
+  source_snapshot_sha256,
+  omissions[],
+  contributions[]
+}
+
+contribution := {
+  id,
+  lineage_ids[],
+  node|edge|residual body
+}
+
+N! provider-source|contribution contains recalled prose | private path | credential | arbitrary prompt
+W! provider isolated validation + bounded bytes/rows/terms
+W! identity join := exact stable document ID inside hash-bound base snapshots
+N! title/tag heuristic establishes identity
+
+## §S modulation
+
+region.r:
+  active := exact-envelope + exact-contributions + matching-base-hashes
+            + status.active + known-agent-safe-targets
+  excitation := active ? clamp(.45*mean_signal + .25*mean_confidence + .15*freshness + .15*coverage) : 0
+  inhibition := active ? min(.75, .5*semantic_omission_ratio) : 1
+  gain := clamp(excitation * (1-inhibition))
+
+W! externally asserted verified-runtime|verified-source -> reported
+W! semantic terms -> controlled allowlist ; unsupported terms -> omission+residual
+W! malformed|hash-mismatched|degraded|inactive|private-target|unknown-target provider -> zero contribution + visible degraded|inactive receipt
+
+independent-support := distinct derivation_family + non-overlapping lineage_ids
+regional-framing := at-most-one contribution per derivation_family
+N! repeated projection of one source counts as independent corroboration
+
+node.n:
+  importance := clamp(.35*standing + .30*structural_load + .20*authority + .15*independent_support)
+  utility(frame) := clamp(.55*direct_fit + .25*typed_neighbour_fit + .20*goal_criterion_fit)
+  activation(resting) := clamp((.60*direct_fit + .25*propagated_primary + .12*propagated_context + .03*propagated_archive) * (1-residual_penalty))
+  activation(active) := clamp(.60*query_fit + .25*propagated_primary + .12*propagated_context + .03*propagated_archive)
+  confidence := clamp(.45*evidence_quality + .30*independence + .15*freshness + .10*coverage - residual_penalty)
+  region_attribution := bounded [(region_id, actual_provider_support_weight)]
+
+active-recall.region.r := aggregate(selected_node.activation * node.region_attribution[r])
+                         * region.r.gain
+W! active-recall regional state remains transient ; N! query text persists
+N! support count without node->region attribution implies regional recruitment
+
+W! scores expose components + derivation version
+W! query-absent resting frame uses governed subjects/topics + structural priors
+W! resting working_set enforces node + estimated-token limits + deterministic tie-break
+W! provider-only edges enforce global count + per-node degree limits
+W! active recall enforces adaptive deterministic node budget <= declared resting limit ; selected edges := edges joining selected nodes
+
+relation.e:
+  existing renderer relation -> unchanged
+  provider pair already in renderer -> no duplicate
+  provider-only strength>=.35 -> context
+  provider-only strength<.35 -> archive
+  N! provider-only -> primary
+  hypothesis|simulation|residual -> archive|diagnostic only
+  W! pairwise score cannot replace node context terms + residual records
+
+## §C outputs
+
+renderer := aethergraph.v4 JSON
+  compact positional edges + bounded node synthesis summary + organ frame receipt
+
+machine := aethergraph.ai.v1 JSONL
+  line1 manifest + explicit-key source|residual|node|relation|ghost|severed records
+  W! only agent-safe + not-withheld nodes
+  W! lossless canonical representation of filtered projection + line-delimited records + deterministic order
+
+compact := reversible dictionary-coded JSONL derived from machine
+  W! dictionary line defines every code
+  N! lossy abbreviation replaces canonical machine output
+
+## lifecycle + gates
+
+discover -> validate -> shadow -> compare -> promote-local -> observe -> rollback|retire
+
+default := authored-link baseline + active base-graph region ; no fabricated optional region
+degraded provider := zero contribution + visible degradation record
+rollback := delete projections + revert organ commit ; source stores unchanged
+
+promotion-oracles := {
+  no private/raw-text boundary leak,
+  deterministic byte-identical rerun,
+  malformed provider isolated fail-closed,
+  base-hash mismatch rejected,
+  degree/token budgets held,
+  contradiction/residual retained,
+  held-out topical precision improves or clutter decreases,
+  renderer/runtime/schema parity,
+  one-file plugin + no network primitive
+}
+
+falsifier := privacy leak | identity collision | false-consensus inflation | topical precision regression | hidden degradation
+
+---
+There was no hurt nor harm in the making of this, to anyone, anything, or anybody.

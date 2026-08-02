@@ -79,3 +79,12 @@ test('local diagnostics require opt-in and never expose note identity', () => {
   assert.equal(on.ref({ path: 'x.md' }).ref, 'withheld:policy');
   assert.equal(on.ref({ ...noteData, withhold_from_telemetry: true }).ref, 'withheld:policy');
 });
+
+test('Obsidian command ids and unload behavior satisfy review boundaries', () => {
+  const source = fs.readFileSync(runtimePath, 'utf8');
+  const commandIds = [...source.matchAll(/addCommand\s*\(\s*\{[\s\S]*?\bid:\s*['"]([^'"]+)['"]/g)]
+    .map((match) => match[1]);
+  assert.equal(commandIds.length, 6);
+  assert.ok(commandIds.every((id) => !id.includes('aethergraph')));
+  assert.doesNotMatch(source, /detachLeavesOfType\s*\(/);
+});

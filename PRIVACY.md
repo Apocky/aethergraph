@@ -4,11 +4,19 @@ Aethergraph is local-first. The distributed plugin contains no vault, graph payl
 
 ## What the plugin reads
 
-To draw a graph, Aethergraph can read note metadata available through Obsidian and a local Aethergraph v3 payload. That data may include local paths, display titles, tags, topics, and connection evidence. It stays in the local Obsidian environment unless the user separately exports or shares it.
+To draw a graph, Aethergraph can read note metadata available through Obsidian and a local Aethergraph v3 or v4 payload. That data may include local paths, display titles, tags, topics, controlled subjects, contextual frames, and connection evidence. It stays in the local Obsidian environment unless the user separately exports or shares it.
+
+The optional synthesizer runs outside the plugin. It accepts bounded, hash-bound projection
+files and never needs direct access to a memory service. Public releases contain only code,
+schemas, and invented fixtures. They do not contain projection files or generated graphs.
 
 ## Network behavior
 
 Aethergraph does not send analytics or diagnostic data to a remote service. It does not require an account.
+
+The plugin contains no network client. Task-conditioned recall is computed locally from the
+loaded graph and the text currently typed into the local filter. Filter text is not persisted
+in the payload or diagnostic stream.
 
 ## Diagnostics
 
@@ -18,4 +26,4 @@ Disabling diagnostics stops new collection and clears retained diagnostic events
 
 ## Sharing and exports
 
-A label such as `shareable` describes a local policy decision; it is not consent or legal authority to publish a note. Review every export independently. Synthetic examples are the only graph data included in this repository.
+A label such as `agent-safe` or `shareable` describes a local processing rule; it is not consent or legal authority to publish a note. The canonical AI JSONL exporter excludes non-agent-safe nodes by default, but every export still requires independent review. Synthetic examples are the only graph data included in this repository.

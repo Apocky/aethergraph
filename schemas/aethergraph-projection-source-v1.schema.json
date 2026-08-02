@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Apocky/aethergraph/blob/main/schemas/aethergraph-projection-source-v1.schema.json",
+  "title": "Aethergraph projection source v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "provider_id",
+    "observed_at",
+    "status",
+    "authority",
+    "derivation_family",
+    "base",
+    "source_snapshot_sha256",
+    "omissions",
+    "contributions"
+  ],
+  "properties": {
+    "schema": { "const": "aethergraph.projection-source.v1" },
+    "provider_id": { "$ref": "#/$defs/slug" },
+    "observed_at": { "$ref": "#/$defs/time" },
+    "status": { "enum": ["active", "degraded", "inactive"] },
+    "authority": { "enum": ["read_only", "none"] },
+    "derivation_family": { "$ref": "#/$defs/slug" },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_index_sha256", "graph_sha256"],
+      "properties": {
+        "agent_index_sha256": { "$ref": "#/$defs/hash" },
+        "graph_sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "source_snapshot_sha256": { "$ref": "#/$defs/hash" },
+    "omissions": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/slug" }
+    },
+    "contributions": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/nodeContribution" },
+          { "$ref": "#/$defs/edgeContribution" },
+          { "$ref": "#/$defs/residualContribution" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*$"
+    },
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@+-]*$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 35
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nullableScore": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "evidence": {
+      "enum": [
+        "verified-runtime",
+        "verified-source",
+        "inferred",
+        "reported",
+        "proposed",
+        "unknown",
+        "refuted",
+        "residual"
+      ]
+    },
+    "lineage": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/hash" }
+    },
+    "weightedTerms": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          { "$ref": "#/$defs/slug" },
+          { "$ref": "#/$defs/score" }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "nodeContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "node",
+        "subjects",
+        "contexts",
+        "relevance",
+        "importance",
+        "utility",
+        "confidence",
+        "evidence",
+        "lineage_ids",
+        "as_of"
+      ],
+      "properties": {
+        "kind": { "const": "node" },
+        "id": { "$ref": "#/$defs/safeId" },
+        "node": { "$ref": "#/$defs/safeId" },
+        "subjects": { "$ref": "#/$defs/weightedTerms" },
+        "contexts": { "$ref": "#/$defs/weightedTerms" },
+        "relevance": { "$ref": "#/$defs/score" },
+        "importance": { "$ref": "#/$defs/nullableScore" },
+        "utility": { "$ref": "#/$defs/nullableScore" },
+        "confidence": { "$ref": "#/$defs/score" },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "lineage_ids": { "$ref": "#/$defs/lineage" },
+        "as_of": { "$ref": "#/$defs/time" }
+      }
+    },
+    "edgeContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "a",
+        "b",
+        "relation",
+        "score",
+        "confidence",
+        "evidence",
+        "lineage_ids",
+        "as_of",
+        "status"
+      ],
+      "properties": {
+        "kind": { "const": "edge" },
+        "id": { "$ref": "#/$defs/safeId" },
+        "a": { "$ref": "#/$defs/safeId" },
+        "b": { "$ref": "#/$defs/safeId" },
+        "relation": { "$ref": "#/$defs/slug" },
+        "score": { "$ref": "#/$defs/score" },
+        "confidence": { "$ref": "#/$defs/score" },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "lineage_ids": { "$ref": "#/$defs/lineage" },
+        "as_of": { "$ref": "#/$defs/time" },
+        "status": { "enum": ["active", "degraded", "inactive"] }
+      }
+    },
+    "residualContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "nodes",
+        "code",
+        "severity",
+        "evidence",
+        "lineage_ids",
+        "as_of"
+      ],
+      "properties": {
+        "kind": { "const": "residual" },
+        "id": { "$ref": "#/$defs/safeId" },
+        "nodes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/safeId" }
+        },
+        "code": { "$ref": "#/$defs/slug" },
+        "severity": { "$ref": "#/$defs/score" },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "lineage_ids": { "$ref": "#/$defs/lineage" },
+        "as_of": { "$ref": "#/$defs/time" }
+      }
+    }
+  }
+}

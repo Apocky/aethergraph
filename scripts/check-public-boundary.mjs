@@ -1,6 +1,7 @@
 import { readdir, readFile, lstat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseProjectionSource, synthesizeGraph } from "../tools/synthesis-core.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -82,15 +83,30 @@ const REQUIRED_REPOSITORY_FILES = Object.freeze([
   "manifest.json",
   "versions.json",
   "package.json",
+  "package-lock.json",
   "schemas/aethergraph-v3.schema.json",
-  "tests/fixtures/aethergraph-v3.synthetic.json"
+  "schemas/aethergraph-v4.schema.json",
+  "schemas/aethergraph-projection-source-v1.schema.json",
+  "schemas/aethergraph-ai-v1.schema.json",
+  "schemas/aethergraph-ai-compact-v1.schema.json",
+  "specs/HOLISTIC_MEMORY_SYNTHESIS_ORGAN_V1.csl",
+  "tools/synthesis-core.mjs",
+  "tools/synthesize.mjs",
+  "tests/fixtures/aethergraph-v3.synthetic.json",
+  "tests/fixtures/aethergraph-v4.synthetic.json",
+  "tests/fixtures/projection-source-v1.synthetic.json",
+  "tests/fixtures/aethergraph-ai-v1.synthetic.jsonl",
+  "tests/fixtures/aethergraph-ai-compact-v1.synthetic.jsonl",
+  "tests/synthesis.test.mjs"
 ]);
 
 const REQUIRED_RELEASE_FILES = Object.freeze(["main.js", "manifest.json", "styles.css"]);
 const SKIP_DIRECTORIES = new Set([".git", "node_modules", "coverage", "dist", "release"]);
 const FORBIDDEN_BASENAMES = new Set(["data.json", ".env", ".env.local", ".env.production"]);
-const TEXT_EXTENSIONS = new Set([".cjs", ".css", ".js", ".json", ".md", ".mjs", ".txt", ".yaml", ".yml"]);
+const TEXT_EXTENSIONS = new Set([".cjs", ".csl", ".css", ".js", ".json", ".jsonl", ".md", ".mjs", ".txt", ".yaml", ".yml"]);
 const SYNTHETIC_FIXTURE = "tests/fixtures/aethergraph-v3.synthetic.json";
+const SYNTHETIC_V4_FIXTURE = "tests/fixtures/aethergraph-v4.synthetic.json";
+const SYNTHETIC_PROVIDER_FIXTURE = "tests/fixtures/projection-source-v1.synthetic.json";
 const MAX_PUBLIC_FILE_BYTES = 2 * 1024 * 1024;
 
 function normalize(relativePath) {
@@ -151,13 +167,15 @@ export function scanText(relativePath, text) {
   for (const [label, source] of internalTokens) {
     if (new RegExp(`\\b${source}\\b`, "i").test(text)) findings.push(`${relativePath}: ${label}`);
   }
-  if (relativePath === "main.js") {
+  if (relativePath === "main.js" || relativePath.startsWith("tools/")) {
     const runtimeRules = [
       ["network fetch primitive", new RegExp(`\\b${["fet", "ch"].join("")}\\s*\\(`)],
       ["XML HTTP primitive", new RegExp(`\\b${["XML", "HttpRequest"].join("")}\\b`)],
       ["web socket primitive", new RegExp(`\\b${["Web", "Socket"].join("")}\\b`)],
       ["beacon primitive", new RegExp(`\\b${["send", "Beacon"].join("")}\\b`)],
-      ["dynamic evaluation", new RegExp(`\\b${["ev", "al"].join("")}\\s*\\(`)]
+      ["dynamic evaluation", new RegExp(`\\b${["ev", "al"].join("")}\\s*\\(`)],
+      ["Node network module", /(?:node:)?https?|node:net|undici/],
+      ["child process primitive", /child_process|execFile|execSync|spawnSync|\bspawn\s*\(/]
     ];
     for (const [label, pattern] of runtimeRules) {
       if (pattern.test(text)) findings.push(`${relativePath}: ${label} is forbidden in the public runtime`);
@@ -284,7 +302,7 @@ export function validateGraph(graph, label = SYNTHETIC_FIXTURE) {
 function validateManifest(manifest) {
   const findings = [];
   if (manifest.id !== "aethergraph") findings.push("manifest.json: id must be aethergraph");
-  if (manifest.version !== "0.1.0") findings.push("manifest.json: public beta version must be 0.1.0");
+  if (manifest.version !== "0.2.0") findings.push("manifest.json: public beta version must be 0.2.0");
   if (manifest.isDesktopOnly !== true) findings.push("manifest.json: beta must remain desktop-only");
   if (typeof manifest.minAppVersion !== "string" || !manifest.minAppVersion) findings.push("manifest.json: minAppVersion is required");
   return findings;
@@ -350,8 +368,17 @@ export async function runBoundaryChecks({ root = ROOT, release = false } = {}) {
 
     if (extension === ".json") {
       const parsed = await readJson(file.absolute, file.relative, findings);
-      if (parsed?.schema === "aethergraph.v3" && file.relative !== SYNTHETIC_FIXTURE) {
-        findings.push(`${file.relative}: non-synthetic graph payload is forbidden`);
+      const fixtureForSchema = {
+        "aethergraph.v3": SYNTHETIC_FIXTURE,
+        "aethergraph.v4": SYNTHETIC_V4_FIXTURE,
+        "aethergraph.projection-source.v1": SYNTHETIC_PROVIDER_FIXTURE
+      };
+      if (parsed?.schema && Object.hasOwn(fixtureForSchema, parsed.schema)
+          && file.relative !== fixtureForSchema[parsed.schema]) {
+        findings.push(`${file.relative}: non-synthetic ${parsed.schema} payload is forbidden`);
+      }
+      if (["aethergraph.ai.v1", "aethergraph.ai.compact.v1"].includes(parsed?.schema)) {
+        findings.push(`${file.relative}: generated synthesis or AI payload is forbidden`);
       }
     }
   }
@@ -359,6 +386,7 @@ export async function runBoundaryChecks({ root = ROOT, release = false } = {}) {
   const manifestFile = byPath.get("manifest.json");
   const versionsFile = byPath.get("versions.json");
   const fixtureFile = byPath.get(SYNTHETIC_FIXTURE);
+  const providerFixtureFile = byPath.get(SYNTHETIC_PROVIDER_FIXTURE);
   const schemaFile = byPath.get("schemas/aethergraph-v3.schema.json");
 
   if (manifestFile) {
@@ -375,10 +403,37 @@ export async function runBoundaryChecks({ root = ROOT, release = false } = {}) {
     const graph = await readJson(fixtureFile.absolute, fixtureFile.relative, findings);
     if (graph) findings.push(...validateGraph(graph));
   }
+  if (fixtureFile && providerFixtureFile) {
+    const graph = await readJson(fixtureFile.absolute, fixtureFile.relative, findings);
+    const providerText = await readFile(providerFixtureFile.absolute, "utf8");
+    const provider = parseProjectionSource(providerText);
+    if (provider.codes.length) findings.push(`${SYNTHETIC_PROVIDER_FIXTURE}: ${provider.codes.join(", ")}`);
+    if (graph && provider.document) {
+      const base = provider.document.base;
+      const synthesized = synthesizeGraph({
+        graph,
+        providers: [provider],
+        baseGraphSha256: base.graph_sha256,
+        agentIndexSha256: base.agent_index_sha256
+      });
+      const region = synthesized.synthesis.regions.find((item) => item.id === provider.document.provider_id);
+      if (region?.status !== "active") {
+        findings.push(`${SYNTHETIC_PROVIDER_FIXTURE}: fixture provider must be active after validation`);
+      }
+    }
+  }
   if (schemaFile) {
     const schema = await readJson(schemaFile.absolute, schemaFile.relative, findings);
     if (schema?.$schema !== "https://json-schema.org/draft/2020-12/schema") {
       findings.push("schemas/aethergraph-v3.schema.json: expected JSON Schema draft 2020-12");
+    }
+  }
+  for (const relative of REQUIRED_REPOSITORY_FILES.filter((item) => item.startsWith("schemas/"))) {
+    const file = byPath.get(relative);
+    if (!file) continue;
+    const schema = await readJson(file.absolute, file.relative, findings);
+    if (schema?.$schema !== "https://json-schema.org/draft/2020-12/schema") {
+      findings.push(`${relative}: expected JSON Schema draft 2020-12`);
     }
   }
 
