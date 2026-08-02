@@ -146,6 +146,14 @@
   padding: 0 5px;
 }
 .ag-tip-facets { margin-top: 4px; font-size: 10.5px; color: rgba(196, 160, 240, 0.85); }
+.ag-tip-contexts { margin-top: 3px; font-size: 10.5px; color: rgba(126, 210, 199, 0.82); }
+.ag-tip-synthesis {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  color: rgba(211, 224, 246, 0.86);
+  font-size: 10.5px;
+}
 
 /* ---------------------------------------------------------------- selection card
    Pinned by a click. Sits bottom-left so it does not fight the telemetry panel on the right
@@ -179,6 +187,37 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+.ag-synthesis {
+  margin: 2px 0 10px;
+  padding: 8px;
+  border: 1px solid rgba(126, 240, 192, 0.14);
+  border-radius: 7px;
+  background: rgba(126, 240, 192, 0.035);
+}
+.ag-synthesis-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.ag-synthesis-metric {
+  min-width: 0;
+  padding: 4px 2px 3px;
+  text-align: center;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.ag-synthesis-score { color: #dff9ef; font-size: 13px; font-weight: 600; line-height: 1.15; }
+.ag-synthesis-detail { margin-top: 6px; color: rgba(180, 202, 222, 0.72); font-size: 9.5px; }
+.ag-region-status { margin-top: 5px; color: rgba(126, 240, 192, 0.76); font-size: 9.5px; }
+.ag-region-status.is-degraded { color: #e7c994; }
+.ag-region-degraded { color: rgba(231, 201, 148, 0.72); font-size: 9px; word-break: break-word; }
+.ag-region-recruitment-title { margin-top: 7px; }
+.ag-region-recruitment { display: grid; gap: 2px; }
+.ag-region-recruitment-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: rgba(193, 228, 217, 0.82);
+  font-size: 9.5px;
+}
+.ag-region-recruitment-item.is-degraded { color: rgba(231, 201, 148, 0.8); }
 
 .ag-card-rel { display: flex; gap: 6px; margin-bottom: 10px; }
 .ag-card-stat {
@@ -232,7 +271,16 @@
   cursor: pointer;
 }
 
-.ag-card-facets { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 6px; }
+.ag-card-term-block { margin: 7px 0 0; }
+.ag-card-term-label {
+  margin-bottom: 3px;
+  color: rgba(165, 180, 210, 0.58);
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.ag-card-facets { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 4px; }
+.ag-card-facets.is-legacy { margin: 8px 0 6px; }
 .ag-chip {
   background: transparent; font-size: 10px; padding: 1px 7px; border-radius: 999px;
   border: 1px solid rgba(150, 175, 220, 0.4); cursor: pointer;

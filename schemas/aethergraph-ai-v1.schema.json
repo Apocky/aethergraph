@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Apocky/aethergraph/blob/main/schemas/aethergraph-ai-v1.schema.json",
+  "title": "Aethergraph AI v1 JSONL record",
+  "oneOf": [
+    { "$ref": "#/$defs/manifest" },
+    { "$ref": "#/$defs/source" },
+    { "$ref": "#/$defs/residual" },
+    { "$ref": "#/$defs/node" },
+    { "$ref": "#/$defs/relation" },
+    { "$ref": "#/$defs/ghost" },
+    { "$ref": "#/$defs/severed" }
+  ],
+  "$defs": {
+    "recordBase": {
+      "type": "object",
+      "required": ["schema", "record"],
+      "properties": { "schema": { "const": "aethergraph.ai.v1" }, "record": { "type": "string" } }
+    },
+    "manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "record", "graph"],
+      "properties": {
+        "schema": { "const": "aethergraph.ai.v1" },
+        "record": { "const": "manifest" },
+        "graph": {
+          "type": "object", "additionalProperties": false,
+          "required": ["schema", "observed_at", "counts", "legend", "edge_fields", "facet_vocab", "reason_vocab", "presentation_vocab", "synthesis"],
+          "properties": {
+            "schema": { "const": "aethergraph.v4" },
+            "observed_at": { "type": "string", "format": "date-time" },
+            "counts": { "type": "object" },
+            "legend": { "type": "object" },
+            "edge_fields": { "type": "array", "items": { "type": "string" } },
+            "facet_vocab": { "type": "array", "items": { "type": "string" } },
+            "reason_vocab": { "type": "array" },
+            "presentation_vocab": { "type": "array", "items": { "type": "string" } },
+            "synthesis": {
+              "type": "object", "additionalProperties": false,
+              "required": ["schema", "frame_ref", "mode", "authority", "base", "algorithm", "budget", "working_set"],
+              "properties": {
+                "schema": { "const": "aethergraph.synthesis.v1" },
+                "frame_ref": { "type": "string" },
+                "mode": { "enum": ["resting", "active"] },
+                "authority": { "const": "none" },
+                "base": { "type": "object" },
+                "algorithm": { "const": "holistic-modulator-v1" },
+                "budget": { "type": "object" },
+                "working_set": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "record", "index", "source"],
+      "properties": {
+        "schema": { "const": "aethergraph.ai.v1" },
+        "record": { "const": "source" },
+        "index": { "type": "integer", "minimum": 0 },
+        "source": { "$ref": "aethergraph-v4.schema.json#/$defs/region" }
+      }
+    },
+    "residual": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "record", "index", "residual"],
+      "properties": {
+        "schema": { "const": "aethergraph.ai.v1" },
+        "record": { "const": "residual" },
+        "index": { "type": "integer", "minimum": 0 },
+        "residual": { "$ref": "aethergraph-v4.schema.json#/$defs/residual" }
+      }
+    },
+    "node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "record", "index", "node"],
+      "properties": {
+        "schema": { "const": "aethergraph.ai.v1" },
+        "record": { "const": "node" },
+        "index": { "type": "integer", "minimum": 0 },
+        "node": { "$ref": "aethergraph-v4.schema.json#/$defs/node" }
+      }
+    },
+    "relation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "record", "collection", "index", "a", "b", "weight", "facet_index", "facet", "reach", "span", "facet_gap", "relevance", "reason_index", "reason", "signals", "presentation"],
+      "properties": {
+        "schema": { "const": "aethergraph.ai.v1" },
+        "record": { "const": "relation" },
+        "collection": { "enum": ["explicit", "latent"] },
+        "index": { "type": "integer", "minimum": 0 },
+        "a": { "type": "string" },
+        "b": { "type": "string" },
+        "weight": { "type": "number" },
+        "facet_index": { "type": "integer", "minimum": -1 },
+        "facet": { "type": ["string", "null"] },
+        "reach": { "type": "number" },
+        "span": { "type": "number" },
+        "facet_gap": { "enum": [-1, 0, 1] },
+        "relevance": { "type": "number" },
+        "reason_index": { "type": "integer", "minimum": 0 },
+        "reason": { "oneOf": [{ "type": "string" }, { "type": "object" }] },
+        "signals": { "type": "integer", "minimum": 0 },
+        "presentation": { "enum": ["primary", "context", "archive"] }
+      }
+    },
+    "ghost": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "record", "index", "ghost"],
+      "properties": {
+        "schema": { "const": "aethergraph.ai.v1" }, "record": { "const": "ghost" },
+        "index": { "type": "integer", "minimum": 0 },
+        "ghost": { "$ref": "aethergraph-v3.schema.json#/$defs/ghost" }
+      }
+    },
+    "severed": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "record", "index", "severed"],
+      "properties": {
+        "schema": { "const": "aethergraph.ai.v1" }, "record": { "const": "severed" },
+        "index": { "type": "integer", "minimum": 0 },
+        "severed": { "$ref": "aethergraph-v3.schema.json#/$defs/severed" }
+      }
+    }
+  }
+}

@@ -1019,22 +1019,441 @@ class Telemetry {
 const VIEW_TYPE = 'aethergraph-view';
 const PAYLOADS = ['.aethergraph/aethergraph.json'];
 const PAYLOAD_LIMITS = { bytes: 128 * 1024 * 1024, nodes: 100000, edges: 1000000, text: 4096 };
+const V4_EDGE_FIELDS = ['a', 'b', 'weight', 'facet', 'reach', 'span', 'facet_gap',
+  'relevance', 'reason', 'signals', 'presentation'];
+const PRESENTATIONS = ['primary', 'context', 'archive'];
+const PRIVACY_LANES = ['agent-safe', 'private-local', 'restricted-pointer', 'quarantined'];
+const NODE_EVIDENCE = ['verified-runtime', 'verified-source', 'inferred', 'reported', 'proposed',
+  'unknown', 'refuted'];
+const SYNTHESIS_EVIDENCE = ['observed', 'verified-source', 'inferred', 'reported', 'proposed',
+  'unknown', 'refuted', 'residual'];
+const SAFE_REF = /^(?:[a-z0-9][a-z0-9._:@-]{0,127}|sha256:[0-9a-f]{64})$/i;
+const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function plainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function boundedString(value, label, opts) {
+  const o = opts || {};
+  if (typeof value !== 'string' || value.length > (o.max || PAYLOAD_LIMITS.text)
+      || (o.nonempty && !value.length)) throw new Error(`${label} must be a bounded string`);
+  if (o.safe && !SAFE_REF.test(value)) throw new Error(`${label} must be a safe slug or hash`);
+  return value;
+}
+
+function boundedNumber(value, label, min, max, integer) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max
+      || (integer && !Number.isInteger(value))) {
+    throw new Error(`${label} must be ${integer ? 'an integer' : 'a finite number'} in ${min}..${max}`);
+  }
+  return value;
+}
+
+function boundedStringArray(value, label, opts) {
+  const o = opts || {};
+  if (!Array.isArray(value) || value.length > (o.maxItems || 256)) {
+    throw new Error(`${label} must be a bounded array`);
+  }
+  const seen = new Set();
+  for (let i = 0; i < value.length; i++) {
+    const s = boundedString(value[i], `${label}[${i}]`, { nonempty: true, safe: !!o.safe,
+      max: o.maxText || PAYLOAD_LIMITS.text });
+    if (o.unique && seen.has(s)) throw new Error(`${label} must contain unique values`);
+    seen.add(s);
+  }
+  return value;
+}
+
+function exactKeys(value, expected, label) {
+  if (!plainObject(value)) throw new Error(`${label} must be an object`);
+  const actual = Object.keys(value).sort();
+  const wanted = expected.slice().sort();
+  if (actual.length !== wanted.length || actual.some((key, i) => key !== wanted[i])) {
+    throw new Error(`${label} must contain exactly ${expected.join(', ')}`);
+  }
+}
+
+function boundedJson(value, label, depth) {
+  const d = depth || 0;
+  if (d > 4) throw new Error(`${label} exceeds bounded JSON depth`);
+  if (value === null || typeof value === 'boolean') return;
+  if (typeof value === 'string') { boundedString(value, label); return; }
+  if (typeof value === 'number') { boundedNumber(value, label, -1000000000, 1000000000, false); return; }
+  if (Array.isArray(value)) {
+    if (value.length > 256) throw new Error(`${label} exceeds bounded JSON array limit`);
+    for (let i = 0; i < value.length; i++) boundedJson(value[i], `${label}[${i}]`, d + 1);
+    return;
+  }
+  if (!plainObject(value) || Object.keys(value).length > 64) {
+    throw new Error(`${label} must be bounded JSON data`);
+  }
+  for (const key of Object.keys(value)) {
+    if (!/^-?[a-z0-9_]+$/i.test(key)) throw new Error(`${label} has an unsafe field`);
+    boundedJson(value[key], `${label}.${key}`, d + 1);
+  }
+}
+
+function validateScoreParts(value, label) {
+  if (!plainObject(value)) throw new Error(`${label} must be an object`);
+  const keys = Object.keys(value);
+  if (keys.length > 32) throw new Error(`${label} has too many parts`);
+  for (const key of keys) {
+    boundedString(key, `${label} key`, { nonempty: true, safe: true, max: 128 });
+    boundedNumber(value[key], `${label}.${key}`, 0, 1, false);
+  }
+}
+
+function validateScoredTerms(value, label) {
+  if (!Array.isArray(value) || value.length > 64) throw new Error(`${label} must be a bounded array`);
+  const seen = new Set();
+  for (let i = 0; i < value.length; i++) {
+    const pair = value[i];
+    if (!Array.isArray(pair) || pair.length !== 2) throw new Error(`${label}[${i}] must be [slug, score]`);
+    const slug = boundedString(pair[0], `${label}[${i}][0]`, { nonempty: true, safe: true, max: 128 });
+    boundedNumber(pair[1], `${label}[${i}][1]`, 0, 1, false);
+    if (seen.has(slug)) throw new Error(`${label} contains duplicate slug ${slug}`);
+    seen.add(slug);
+  }
+}
+
+function validateNodeSynthesis(value, label) {
+  exactKeys(value, ['subjects', 'contexts', 'importance', 'utility', 'activation', 'confidence',
+    'support', 'region_attribution', 'residuals'], label);
+  validateScoredTerms(value.subjects, `${label}.subjects`);
+  validateScoredTerms(value.contexts, `${label}.contexts`);
+  validateScoredTerms(value.region_attribution, `${label}.region_attribution`);
+  exactKeys(value.importance, ['score', 'parts'], `${label}.importance`);
+  boundedNumber(value.importance.score, `${label}.importance.score`, 0, 1, false);
+  exactKeys(value.importance.parts, ['standing', 'load', 'authority', 'support'],
+    `${label}.importance.parts`);
+  validateScoreParts(value.importance.parts, `${label}.importance.parts`);
+  exactKeys(value.utility, ['score', 'frame_ref', 'parts'], `${label}.utility`);
+  boundedNumber(value.utility.score, `${label}.utility.score`, 0, 1, false);
+  boundedString(value.utility.frame_ref, `${label}.utility.frame_ref`, { nonempty: true, safe: true, max: 128 });
+  exactKeys(value.utility.parts, ['direct', 'neighbour', 'goal'], `${label}.utility.parts`);
+  validateScoreParts(value.utility.parts, `${label}.utility.parts`);
+  exactKeys(value.activation, ['score', 'direct', 'propagated', 'inhibited'], `${label}.activation`);
+  for (const key of ['score', 'direct', 'propagated', 'inhibited']) {
+    boundedNumber(value.activation[key], `${label}.activation.${key}`, 0, 1, false);
+  }
+  exactKeys(value.confidence, ['score', 'parts'], `${label}.confidence`);
+  boundedNumber(value.confidence.score, `${label}.confidence.score`, 0, 1, false);
+  exactKeys(value.confidence.parts, ['evidence', 'independence', 'freshness', 'coverage', 'residual'],
+    `${label}.confidence.parts`);
+  validateScoreParts(value.confidence.parts, `${label}.confidence.parts`);
+  exactKeys(value.support, ['regions', 'independent', 'lineages'], `${label}.support`);
+  for (const key of ['regions', 'independent', 'lineages']) {
+    boundedNumber(value.support[key], `${label}.support.${key}`, 0, 1000000, true);
+  }
+  if (value.support.regions !== value.region_attribution.length) {
+    throw new Error(`${label}.support.regions must match region_attribution`);
+  }
+  boundedStringArray(value.residuals, `${label}.residuals`, { safe: true, unique: true,
+    maxItems: 64, maxText: 128 });
+}
+
+function validateV4Region(value, label) {
+  exactKeys(value, ['id', 'status', 'activation', 'inhibition', 'gain', 'confidence',
+    'contributions', 'omissions', 'derivation_family', 'observed_at',
+    'source_snapshot_sha256'], label);
+  boundedString(value.id, `${label}.id`, { nonempty: true, safe: true, max: 128 });
+  boundedString(value.derivation_family, `${label}.derivation_family`, {
+    nonempty: true, safe: true, max: 128 });
+  boundedString(value.observed_at, `${label}.observed_at`, { nonempty: true, max: 64 });
+  if (!ISO_DATETIME.test(value.observed_at) || !Number.isFinite(Date.parse(value.observed_at))) {
+    throw new Error(`${label}.observed_at must be an ISO date-time`);
+  }
+  boundedString(value.source_snapshot_sha256, `${label}.source_snapshot_sha256`, {
+    nonempty: true, max: 64 });
+  if (!/^[0-9a-f]{64}$/i.test(value.source_snapshot_sha256)) {
+    throw new Error(`${label}.source_snapshot_sha256 must be a sha256 hash`);
+  }
+  if (!['active', 'degraded', 'inactive'].includes(value.status)) {
+    throw new Error(`${label}.status has an unsupported value`);
+  }
+  for (const key of ['activation', 'inhibition', 'gain', 'confidence']) {
+    boundedNumber(value[key], `${label}.${key}`, 0, 1, false);
+  }
+  boundedNumber(value.contributions, `${label}.contributions`, 0, 1000000, true);
+  boundedStringArray(value.omissions, `${label}.omissions`, { safe: true, unique: true,
+    maxItems: 256, maxText: 128 });
+}
+
+function validateTopSynthesis(value, nodeIds, nodes) {
+  const label = 'synthesis';
+  exactKeys(value, ['schema', 'frame_ref', 'mode', 'authority', 'base', 'algorithm', 'regions',
+    'budget', 'working_set', 'residuals'], label);
+  if (value.schema !== 'aethergraph.synthesis.v1') throw new Error('unsupported synthesis schema');
+  boundedString(value.frame_ref, `${label}.frame_ref`, { nonempty: true, safe: true, max: 128 });
+  if (!['resting', 'active'].includes(value.mode)) throw new Error(`${label}.mode must be resting or active`);
+  if (value.authority !== 'none') throw new Error(`${label}.authority must be none`);
+  exactKeys(value.base, ['agent_index_sha256', 'graph_sha256'], `${label}.base`);
+  if (value.base.agent_index_sha256 !== null
+      && !/^[0-9a-f]{64}$/i.test(value.base.agent_index_sha256)) {
+    throw new Error(`${label}.base.agent_index_sha256 must be null or a sha256 hash`);
+  }
+  boundedString(value.base.graph_sha256, `${label}.base.graph_sha256`, { nonempty: true });
+  if (!/^[0-9a-f]{64}$/i.test(value.base.graph_sha256)) {
+    throw new Error(`${label}.base.graph_sha256 must be a sha256 hash`);
+  }
+  if (value.algorithm !== 'holistic-modulator-v1') throw new Error(`${label}.algorithm is unsupported`);
+  if (!Array.isArray(value.regions) || value.regions.length > 64) {
+    throw new Error(`${label}.regions must be a bounded array`);
+  }
+  const regionIds = new Set();
+  for (let i = 0; i < value.regions.length; i++) {
+    validateV4Region(value.regions[i], `${label}.regions[${i}]`);
+    const id = value.regions[i].id;
+    if (regionIds.has(id)) throw new Error(`${label}.regions must have unique ids`);
+    regionIds.add(id);
+  }
+  exactKeys(value.budget, ['node_limit', 'edge_limit', 'token_estimate_limit', 'selected_nodes',
+    'selected_edges'], `${label}.budget`);
+  for (const key of ['node_limit', 'selected_nodes']) {
+    boundedNumber(value.budget[key], `${label}.budget.${key}`, 0, PAYLOAD_LIMITS.nodes, true);
+  }
+  for (const key of ['edge_limit', 'selected_edges']) {
+    boundedNumber(value.budget[key], `${label}.budget.${key}`, 0, PAYLOAD_LIMITS.edges, true);
+  }
+  boundedNumber(value.budget.token_estimate_limit, `${label}.budget.token_estimate_limit`,
+    0, 1000000000, true);
+  if (value.budget.selected_nodes > value.budget.node_limit
+      || value.budget.selected_edges > value.budget.edge_limit) {
+    throw new Error(`${label}.budget selected values exceed limits`);
+  }
+  boundedStringArray(value.working_set, `${label}.working_set`, { unique: true,
+    maxItems: PAYLOAD_LIMITS.nodes });
+  for (const id of value.working_set) {
+    if (!nodeIds.has(id)) throw new Error(`${label}.working_set contains an unknown node id`);
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    for (const pair of nodes[i].synthesis.region_attribution) {
+      if (!regionIds.has(pair[0])) {
+        throw new Error(`node ${i}.synthesis.region_attribution contains an unknown region id`);
+      }
+    }
+  }
+  if (value.working_set.length !== value.budget.selected_nodes) {
+    throw new Error(`${label}.working_set length must equal selected_nodes`);
+  }
+  if (!Array.isArray(value.residuals) || value.residuals.length > 4096) {
+    throw new Error(`${label}.residuals must be a bounded array`);
+  }
+  for (let i = 0; i < value.residuals.length; i++) {
+    const residual = value.residuals[i], rlabel = `${label}.residuals[${i}]`;
+    exactKeys(residual, ['code', 'severity', 'nodes', 'evidence'], rlabel);
+    boundedString(residual.code, `${rlabel}.code`, { nonempty: true, safe: true, max: 128 });
+    boundedNumber(residual.severity, `${rlabel}.severity`, 0, 1, false);
+    if (!SYNTHESIS_EVIDENCE.includes(residual.evidence)) {
+      throw new Error(`${rlabel}.evidence has an unsupported value`);
+    }
+    boundedStringArray(residual.nodes, `${rlabel}.nodes`, { unique: true,
+      maxItems: PAYLOAD_LIMITS.nodes });
+    for (const id of residual.nodes) {
+      if (!nodeIds.has(id)) throw new Error(`${rlabel}.nodes contains an unknown node id`);
+    }
+  }
+}
+
+function validateV4Node(n, i) {
+  const label = `node ${i}`;
+  exactKeys(n, ['id', 'title', 'display_title', 'description', 'display_title_source',
+    'label_source', 'topics', 'display_tags', 'path', 'type', 'project', 'area', 'label_area',
+    'role', 'facets', 'tags', 'aliases', 'evidence', 'privacy', 'withhold_from_telemetry',
+    'authority', 'source_path', 'source_sha256', 'source_commit', 'source_tree_dirty',
+    'hand_authored', 'view_scope', 'standing', 'standing_parts', 'corroboration', 'load',
+    'contested', 'authority_rank', 'hybridity', 'family', 'mass', 'age', 'synthesis'], label);
+  for (const key of ['id', 'path', 'title', 'display_title', 'description']) {
+    boundedString(n[key], `${label}.${key}`, { nonempty: key !== 'description' });
+  }
+  for (const key of ['display_title_source', 'label_source', 'type', 'project', 'area', 'label_area',
+    'role', 'authority', 'source_path', 'source_sha256', 'source_commit', 'family']) {
+    if (n[key] !== null && n[key] !== undefined) boundedString(n[key], `${label}.${key}`);
+  }
+  for (const key of ['topics', 'display_tags', 'facets', 'tags', 'aliases']) {
+    boundedStringArray(n[key], `${label}.${key}`, { maxItems: 256 });
+  }
+  if (!NODE_EVIDENCE.includes(n.evidence)) throw new Error(`${label}.evidence has an unsupported value`);
+  if (!PRIVACY_LANES.includes(n.privacy)) throw new Error(`${label}.privacy has an unsupported value`);
+  if (!['core', 'corpus', 'all'].includes(n.view_scope)) throw new Error(`${label}.view_scope has an unsupported value`);
+  for (const key of ['withhold_from_telemetry', 'hand_authored', 'contested']) {
+    if (typeof n[key] !== 'boolean') throw new Error(`${label}.${key} must be boolean`);
+  }
+  if (n.source_tree_dirty !== null && typeof n.source_tree_dirty !== 'boolean') {
+    throw new Error(`${label}.source_tree_dirty must be boolean or null`);
+  }
+  if (n.source_sha256 !== null && !/^[0-9a-f]{64}$/i.test(n.source_sha256)) {
+    throw new Error(`${label}.source_sha256 must be null or a sha256 hash`);
+  }
+  if (n.source_commit !== null && !/^(?:[0-9a-f]{7,64}|unavailable-not-a-git-repository)$/i.test(n.source_commit)) {
+    throw new Error(`${label}.source_commit must be null, a commit hash, or the unavailable sentinel`);
+  }
+  for (const key of ['standing', 'hybridity', 'age']) boundedNumber(n[key], `${label}.${key}`, 0, 1, false);
+  for (const key of ['corroboration', 'load', 'mass']) boundedNumber(n[key], `${label}.${key}`, 0, 1000000000000, false);
+  boundedNumber(n.authority_rank, `${label}.authority_rank`, 0, 4, true);
+  exactKeys(n.standing_parts, ['provenance', 'corroboration', 'load', 'contested'],
+    `${label}.standing_parts`);
+  boundedNumber(n.standing_parts.provenance, `${label}.standing_parts.provenance`, 0, 1, false);
+  boundedNumber(n.standing_parts.corroboration, `${label}.standing_parts.corroboration`,
+    0, 1000000, false);
+  boundedNumber(n.standing_parts.load, `${label}.standing_parts.load`, 0, 1000000000000, false);
+  if (typeof n.standing_parts.contested !== 'boolean') {
+    throw new Error(`${label}.standing_parts.contested must be boolean`);
+  }
+  validateNodeSynthesis(n.synthesis, `${label}.synthesis`);
+}
+
+function validateV4Envelope(d) {
+  exactKeys(d, ['schema', 'observed_at', 'counts', 'legend', 'nodes', 'edge_fields',
+    'facet_vocab', 'reason_vocab', 'presentation_vocab', 'explicit', 'latent', 'ghosts',
+    'severed', 'synthesis'], 'payload');
+  boundedString(d.observed_at, 'observed_at', { nonempty: true, max: 64 });
+  if (!Number.isFinite(Date.parse(d.observed_at))) throw new Error('observed_at must be an ISO date-time');
+  if (!plainObject(d.counts) || Object.keys(d.counts).length > 64) {
+    throw new Error('counts must be a bounded object');
+  }
+  for (const key of ['nodes', 'explicit', 'latent', 'ghosts', 'severed']) {
+    if (!Object.prototype.hasOwnProperty.call(d.counts, key)) throw new Error(`counts.${key} is required`);
+  }
+  for (const [key, value] of Object.entries(d.counts)) {
+    if (!/^[a-z][a-z0-9_]{0,63}$/i.test(key)) throw new Error('counts has an unsafe field');
+    boundedNumber(value, `counts.${key}`, 0, 1000000000, true);
+  }
+  if (!plainObject(d.legend)) throw new Error('legend must be an object');
+  boundedJson(d.legend, 'legend', 0);
+  if (!Array.isArray(d.ghosts) || d.ghosts.length > PAYLOAD_LIMITS.nodes) {
+    throw new Error('ghosts must be a bounded array');
+  }
+  for (let i = 0; i < d.ghosts.length; i++) {
+    const ghost = d.ghosts[i], label = `ghosts[${i}]`;
+    exactKeys(ghost, ['name', 'docs', 'anchors'], label);
+    boundedString(ghost.name, `${label}.name`, { nonempty: true });
+    boundedNumber(ghost.docs, `${label}.docs`, 0, 1000000000, true);
+    if (!Array.isArray(ghost.anchors) || ghost.anchors.length > 256) {
+      throw new Error(`${label}.anchors must be a bounded array`);
+    }
+    for (let j = 0; j < ghost.anchors.length; j++) {
+      const anchor = ghost.anchors[j], alabel = `${label}.anchors[${j}]`;
+      exactKeys(anchor, ['n', 'w'], alabel);
+      boundedNumber(anchor.n, `${alabel}.n`, 0, d.nodes.length - 1, true);
+      boundedNumber(anchor.w, `${alabel}.w`, 0, 1000000000, false);
+    }
+  }
+  if (!Array.isArray(d.severed) || d.severed.length > PAYLOAD_LIMITS.edges) {
+    throw new Error('severed must be a bounded array');
+  }
+  for (let i = 0; i < d.severed.length; i++) {
+    const item = d.severed[i], label = `severed[${i}]`;
+    exactKeys(item, ['pair', 'shared_areas', 'curated'], label);
+    boundedStringArray(item.pair, `${label}.pair`, { maxItems: 2 });
+    if (item.pair.length !== 2) throw new Error(`${label}.pair must contain two values`);
+    boundedNumber(item.shared_areas, `${label}.shared_areas`, 0, 1000000000, true);
+    if (!Array.isArray(item.curated) || item.curated.length !== 2) {
+      throw new Error(`${label}.curated must contain two values`);
+    }
+    for (let j = 0; j < 2; j++) {
+      if (item.curated[j] !== null) boundedString(item.curated[j], `${label}.curated[${j}]`);
+    }
+  }
+}
+
+function validateV4Vocab(d) {
+  for (const key of ['facet_vocab', 'reason_vocab', 'presentation_vocab']) {
+    if (!Array.isArray(d[key]) || d[key].length > 65536) throw new Error(`${key} must be a bounded array`);
+    const seen = new Set();
+    for (let i = 0; i < d[key].length; i++) {
+      const item = d[key][i];
+      let identity;
+      if (typeof item === 'string') identity = boundedString(item, `${key}[${i}]`, { nonempty: true });
+      else if (key === 'reason_vocab' && plainObject(item)) {
+        exactKeys(item, ['label', 'basis', 'evidence'], `${key}[${i}]`);
+        boundedString(item.label, `${key}[${i}].label`, { nonempty: true });
+        boundedStringArray(item.basis, `${key}[${i}].basis`, {
+          unique: true, maxItems: 32, maxText: 128,
+        });
+        boundedString(item.evidence, `${key}[${i}].evidence`, { nonempty: true });
+        if (!SYNTHESIS_EVIDENCE.includes(item.evidence)) {
+          throw new Error(`${key}[${i}].evidence has an unsupported value`);
+        }
+        identity = JSON.stringify(item);
+      } else throw new Error(`${key}[${i}] has an unsupported value`);
+      if (seen.has(identity)) throw new Error(`${key} must contain unique values`);
+      seen.add(identity);
+    }
+  }
+  if (d.presentation_vocab.length !== PRESENTATIONS.length
+      || d.presentation_vocab.some((item, i) => item !== PRESENTATIONS[i])) {
+    throw new Error('presentation_vocab must be primary, context, archive');
+  }
+}
+
+function validateV4Edges(d) {
+  if (!Array.isArray(d.edge_fields) || d.edge_fields.length !== V4_EDGE_FIELDS.length
+      || d.edge_fields.some((field, i) => field !== V4_EDGE_FIELDS[i])) {
+    throw new Error('edge_fields must match the canonical v4 edge contract');
+  }
+  let count = 0;
+  for (const family of ['explicit', 'latent']) {
+    const rows = d[family];
+    if (!Array.isArray(rows)) throw new Error(`${family} must be an array`);
+    count += rows.length;
+    if (count > PAYLOAD_LIMITS.edges) throw new Error(`edge limit exceeded (${count})`);
+    for (let i = 0; i < rows.length; i++) {
+      const e = rows[i], label = `${family}[${i}]`;
+      if (!Array.isArray(e) || e.length !== V4_EDGE_FIELDS.length) throw new Error(`${label} is malformed`);
+      for (const endpoint of [EDGE.A, EDGE.B]) {
+        boundedNumber(e[endpoint], `${label}.${V4_EDGE_FIELDS[endpoint]}`, 0, d.nodes.length - 1, true);
+      }
+      if (e[EDGE.A] === e[EDGE.B]) throw new Error(`${label} has invalid endpoints`);
+      for (const field of [EDGE.WEIGHT, EDGE.REACH, EDGE.SPAN, EDGE.RELEVANCE]) {
+        boundedNumber(e[field], `${label}.${V4_EDGE_FIELDS[field]}`, 0, 1, false);
+      }
+      boundedNumber(e[EDGE.FACET], `${label}.facet`, -1, d.facet_vocab.length - 1, true);
+      if (![-1, 0, 1].includes(e[EDGE.FACET_GAP])) throw new Error(`${label}.facet_gap has an unsupported value`);
+      boundedNumber(e[EDGE.REASON], `${label}.reason`, 0, d.reason_vocab.length - 1, true);
+      boundedNumber(e[EDGE.SIGNALS], `${label}.signals`, 0, 2147483647, true);
+      if (!PRESENTATIONS.includes(e[EDGE.PRESENTATION])) {
+        throw new Error(`${label}.presentation has an unsupported value`);
+      }
+    }
+  }
+}
 
 function validatePayload(d) {
-  if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('payload must be an object');
-  if (d.schema !== 'aethergraph.v2' && d.schema !== 'aethergraph.v3') {
+  if (!plainObject(d)) throw new Error('payload must be an object');
+  if (d.schema !== 'aethergraph.v2' && d.schema !== 'aethergraph.v3' && d.schema !== 'aethergraph.v4') {
     throw new Error(`unsupported schema ${JSON.stringify(d.schema)}`);
   }
   if (!Array.isArray(d.nodes)) throw new Error('nodes must be an array');
   if (d.nodes.length > PAYLOAD_LIMITS.nodes) throw new Error(`node limit exceeded (${d.nodes.length})`);
   for (let i = 0; i < d.nodes.length; i++) {
     const n = d.nodes[i];
-    if (!n || typeof n !== 'object' || Array.isArray(n)) throw new Error(`node ${i} must be an object`);
+    if (!plainObject(n)) throw new Error(`node ${i} must be an object`);
     for (const k of ['id', 'path', 'title', 'display_title']) {
       if (n[k] !== undefined && (typeof n[k] !== 'string' || n[k].length > PAYLOAD_LIMITS.text)) {
         throw new Error(`node ${i}.${k} must be a bounded string`);
       }
     }
+  }
+  if (d.schema === 'aethergraph.v4') {
+    validateV4Envelope(d);
+    const ids = new Set();
+    for (let i = 0; i < d.nodes.length; i++) {
+      validateV4Node(d.nodes[i], i);
+      if (ids.has(d.nodes[i].id)) throw new Error(`node ${i}.id must be unique`);
+      ids.add(d.nodes[i].id);
+    }
+    validateV4Vocab(d);
+    validateV4Edges(d);
+    validateTopSynthesis(d.synthesis, ids, d.nodes);
+    for (const [key, actual] of [['nodes', d.nodes.length], ['explicit', d.explicit.length],
+      ['latent', d.latent.length], ['ghosts', d.ghosts.length], ['severed', d.severed.length]]) {
+      if (d.counts[key] !== actual) throw new Error(`counts.${key} does not match payload`);
+    }
+    return d;
   }
   let edgeCount = 0;
   for (const family of ['explicit', 'latent']) {
@@ -1293,6 +1712,189 @@ function termNames(value) {
 
 function nodeTopics(d) { return termNames(d && d.topics); }
 function nodeDisplayTags(d) { return termNames(d && d.display_tags); }
+function scoredTermNames(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const entry of value) {
+    const name = Array.isArray(entry) ? entry[0]
+      : entry && typeof entry === 'object' ? (entry.slug || entry.label || entry.name) : null;
+    if (typeof name === 'string' && name.trim() && !out.includes(name.trim())) out.push(name.trim());
+  }
+  return out;
+}
+function nodeSubjects(d) { return scoredTermNames(d && d.synthesis && d.synthesis.subjects); }
+function nodeContexts(d) { return scoredTermNames(d && d.synthesis && d.synthesis.contexts); }
+
+function recallTokens(value) {
+  const normalized = String(value || '').normalize('NFKC').toLocaleLowerCase();
+  const matches = normalized.match(/[\p{L}\p{N}]+/gu) || [];
+  return Array.from(new Set(matches.filter(token => token.length > 1))).sort();
+}
+
+function scoredTerms(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(entry => Array.isArray(entry) && typeof entry[0] === 'string'
+    && typeof entry[1] === 'number' ? [entry[0], clamp(entry[1], 0, 1)] : null).filter(Boolean);
+}
+
+function directRecallFit(d, tokens) {
+  if (!tokens.length) return 0;
+  const fields = [
+    [[displayTitle(d), d && d.title], 1],
+    [d && d.aliases, 0.82],
+    [nodeTopics(d), 0.94],
+    [nodeDisplayTags(d), 0.88],
+    [d && d.facets, 0.74],
+    [d && d.tags, 0.68],
+    [scoredTerms(d && d.synthesis && d.synthesis.subjects), 1],
+    [scoredTerms(d && d.synthesis && d.synthesis.contexts), 0.90],
+  ];
+  const best = new Float64Array(tokens.length);
+  for (const [rawValues, fieldWeight] of fields) {
+    for (const raw of rawValues || []) {
+      const pair = Array.isArray(raw) ? raw : [raw, 1];
+      if (typeof pair[0] !== 'string') continue;
+      const weight = fieldWeight * (typeof pair[1] === 'number' ? clamp(pair[1], 0, 1) : 1);
+      const text = pair[0].normalize('NFKC').toLocaleLowerCase();
+      const fieldTokens = new Set(recallTokens(text));
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        let fit = 0;
+        if (fieldTokens.has(token)) fit = weight;
+        else if (token.length >= 3 && Array.from(fieldTokens).some(part => part.startsWith(token)
+            || token.startsWith(part))) fit = weight * 0.78;
+        else if (token.length >= 3 && text.includes(token)) fit = weight * 0.62;
+        if (fit > best[i]) best[i] = fit;
+      }
+    }
+  }
+  let total = 0;
+  for (const value of best) total += value;
+  return clamp(total / tokens.length, 0, 1);
+}
+
+/* Pure, local recall modulation. The query exists only for the duration of this call. Returned
+   state contains counts and scores, never the query or its tokens, so neither plugin state nor
+   diagnostics can accidentally retain what the user asked about. */
+function modulateRecall(payload, query, options) {
+  const opts = options || {}, nodes = payload && Array.isArray(payload.nodes) ? payload.nodes : [];
+  const tokens = recallTokens(query);
+  if (!tokens.length || !nodes.length) {
+    return { active: false, tokenCount: tokens.length, budget: 0, workingSet: [], scores: [] };
+  }
+  const eligible = Array.isArray(opts.eligible) && opts.eligible.length === nodes.length
+    ? opts.eligible.map(Boolean) : nodes.map(() => true);
+  const direct = nodes.map((node, i) => eligible[i] ? directRecallFit(node, tokens) : 0);
+  const primary = new Float64Array(nodes.length), context = new Float64Array(nodes.length);
+  const archive = new Float64Array(nodes.length);
+  const accumulate = (target, contribution) => {
+    if (contribution <= 0) return;
+    target.value = 1 - (1 - target.value) * (1 - clamp(contribution, 0, 1));
+  };
+  const propagate = (rows, kind) => {
+    for (const edge of rows || []) {
+      const a = edge[EDGE.A], b = edge[EDGE.B];
+      if (!Number.isInteger(a) || !Number.isInteger(b) || !eligible[a] || !eligible[b]) continue;
+      const tier = edgePresentation(edge, kind, payload.presentation_vocab || []);
+      const strengthRaw = Number(edge[EDGE.RELEVANCE]);
+      const strength = Number.isFinite(strengthRaw) ? clamp(strengthRaw, 0, 1)
+        : clamp(Number(edge[EDGE.WEIGHT]) || 0, 0, 1);
+      const target = tier === 'primary' ? primary : tier === 'context' ? context : archive;
+      const av = { value: target[a] }, bv = { value: target[b] };
+      accumulate(av, direct[b] * strength); accumulate(bv, direct[a] * strength);
+      target[a] = av.value; target[b] = bv.value;
+    }
+  };
+  propagate(payload.explicit, 'explicit');
+  propagate(payload.latent, 'latent');
+  const ranked = [];
+  const scores = nodes.map((node, i) => {
+    const propagated = clamp(0.25 * primary[i] + 0.12 * context[i] + 0.03 * archive[i], 0, 1);
+    const rawActivation = clamp(0.60 * direct[i] + propagated, 0, 1);
+    const utility = clamp(0.75 * direct[i] + 0.25 * Math.max(primary[i], context[i], archive[i]), 0, 1);
+    const score = { direct: direct[i], propagated, primary: primary[i], context: context[i],
+      archive: archive[i], utility, rawActivation, activation: 0, inhibited: 0, selected: false };
+    if (eligible[i] && rawActivation >= 0.01) ranked.push(i);
+    return score;
+  });
+  ranked.sort((a, b) => scores[b].rawActivation - scores[a].rawActivation
+    || scores[b].direct - scores[a].direct
+    || Number(nodes[b].synthesis && nodes[b].synthesis.importance
+      && nodes[b].synthesis.importance.score || 0)
+      - Number(nodes[a].synthesis && nodes[a].synthesis.importance
+        && nodes[a].synthesis.importance.score || 0)
+    || String(nodes[a].id || '').localeCompare(String(nodes[b].id || '')));
+  const declared = payload.synthesis && payload.synthesis.budget
+    && Number(payload.synthesis.budget.node_limit);
+  const fallback = Math.max(8, Math.min(64, Math.ceil(Math.sqrt(nodes.length) * 4)));
+  const requested = Number.isInteger(opts.limit) ? opts.limit
+    : Number.isInteger(declared) && declared > 0 ? Math.min(declared, fallback) : fallback;
+  const budget = clamp(requested, 1, nodes.length);
+  const selected = new Set(ranked.slice(0, budget));
+  for (const i of ranked) {
+    if (selected.has(i)) {
+      scores[i].selected = true;
+      scores[i].activation = scores[i].rawActivation;
+    } else scores[i].inhibited = 1;
+  }
+  return { active: true, tokenCount: tokens.length, budget,
+    workingSet: ranked.slice(0, budget).map(i => nodes[i].id), scores };
+}
+
+/* Regional recruitment is derived only from explicit node→region attribution. Support counts
+   alone cannot establish which region contributed to which node, so an absent attribution
+   yields no recruitment instead of a plausible-looking invention. Like node modulation, this
+   receipt is transient and contains no query text or tokens. */
+function modulateRegions(payload, recallFrame) {
+  const nodes = payload && Array.isArray(payload.nodes) ? payload.nodes : [];
+  const declared = payload && payload.synthesis && Array.isArray(payload.synthesis.regions)
+    ? payload.synthesis.regions : [];
+  if (!recallFrame || !recallFrame.active || !declared.length) {
+    return { active: false, total: declared.length, recruited: 0, regions: [] };
+  }
+  const byId = new Map();
+  for (const region of declared) {
+    byId.set(region.id, { id: region.id, status: region.status, excitation: 0,
+      gain: region.gain, inhibition: region.inhibition, confidence: region.confidence,
+      derivationFamily: region.derivation_family, observedAt: region.observed_at,
+      contributions: 0, recruitment: 0 });
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    const score = recallFrame.scores[i];
+    if (!score || !score.selected || score.activation <= 0) continue;
+    const attribution = nodes[i].synthesis && nodes[i].synthesis.region_attribution;
+    for (const pair of attribution || []) {
+      const region = byId.get(pair[0]);
+      if (!region) continue;
+      const contribution = clamp(score.activation * pair[1], 0, 1);
+      if (contribution <= 0) continue;
+      region.excitation = 1 - (1 - region.excitation) * (1 - contribution);
+      region.contributions++;
+    }
+  }
+  const regions = Array.from(byId.values());
+  for (const region of regions) {
+    region.recruitment = region.status === 'inactive' ? 0
+      : clamp(region.excitation * region.gain, 0, 1);
+  }
+  regions.sort((a, b) => b.recruitment - a.recruitment || a.id.localeCompare(b.id));
+  return { active: true, total: regions.length,
+    recruited: regions.filter(region => region.recruitment > 0).length, regions };
+}
+
+function regionSummary(synthesis) {
+  const regions = synthesis && Array.isArray(synthesis.regions) ? synthesis.regions : [];
+  const counts = { active: 0, degraded: 0, inactive: 0 };
+  const degraded = [];
+  for (const region of regions) {
+    if (!region || !Object.prototype.hasOwnProperty.call(counts, region.status)) continue;
+    counts[region.status]++;
+    if (region.status !== 'active') degraded.push(`${region.id}:${region.status}`);
+  }
+  return { total: regions.length, counts, degraded,
+    label: regions.length ? `${counts.active} active · ${counts.degraded} degraded · ${counts.inactive} inactive`
+      : 'no regional receipts' };
+}
 function clipLabel(value, max) {
   const s = String(value || '');
   if (s.length <= max) return s;
@@ -1830,8 +2432,8 @@ class AetherView extends ItemView {
       };
     }
     const inp = this.filterInput = bar.createDiv({ cls: 'ag-ctl' }).createEl('input', { cls: 'ag-search', type: 'text' });
-    inp.placeholder = 'filter…';
-    inp.setAttr('aria-label', 'Filter notes');
+    inp.placeholder = 'recall…';
+    inp.setAttr('aria-label', 'Task-conditioned recall');
     inp.oninput = () => {
       this.query = inp.value.toLowerCase();
       this.relayout();
@@ -1879,8 +2481,8 @@ class AetherView extends ItemView {
     const h = this.tel.health = [];
     const add = (level, msg) => { h.push({ level, msg }); if (level !== 'ok') this.tel.mark('health.' + level, { msg }); };
 
-    if (d.schema !== 'aethergraph.v2' && d.schema !== 'aethergraph.v3') {
-      add('warn', `payload schema is "${d.schema}", this build expects "aethergraph.v2" or "aethergraph.v3" — `
+    if (d.schema !== 'aethergraph.v2' && d.schema !== 'aethergraph.v3' && d.schema !== 'aethergraph.v4') {
+      add('warn', `payload schema is "${d.schema}", this build expects v2, v3 or v4 — `
         + 'channels may be missing or misread');
     } else add('ok', `payload schema ${d.schema}`);
 
@@ -1898,7 +2500,7 @@ class AetherView extends ItemView {
     if (!d.edge_fields || d.edge_fields.length < 7) {
       add('warn', 'edges carry fewer than 7 fields — reach, span or facet-gap state will be unavailable');
     }
-    if (d.schema === 'aethergraph.v3') {
+    if (d.schema === 'aethergraph.v3' || d.schema === 'aethergraph.v4') {
       if (!Array.isArray(d.presentation_vocab) || !d.presentation_vocab.length) {
         add('warn', 'v3 payload has no presentation_vocab — latent connections fall back to archive');
       }
@@ -1906,6 +2508,14 @@ class AetherView extends ItemView {
         add('warn', 'v3 payload has no reason_vocab — connection cards use generic reasons');
       }
     } else add('warn', 'v2 payload has no semantic presentation tiers — Focused mode shows direct links only');
+    if (d.schema === 'aethergraph.v4') {
+      const regions = regionSummary(d.synthesis);
+      if (regions.counts.degraded || regions.counts.inactive) {
+        add('degraded', `memory synthesis regions — ${regions.label}`);
+      } else add('ok', `memory synthesis regions — ${regions.label}`);
+      this.tel.env.synthesisMode = d.synthesis.mode;
+      this.tel.env.synthesisRegions = regions.label;
+    }
     const coreN = d.nodes.filter(DENSITY.core.test).length;
     const corpusN = d.nodes.filter(DENSITY.corpus.test).length;
     if (coreN === corpusN) add('warn', 'Core and Corpus currently contain the same notes — transcript/dial material may be absent');
@@ -1959,19 +2569,21 @@ class AetherView extends ItemView {
     const t0 = performance.now();
     const test = DENSITY[this.s.density].test, q = this.query;
     const keep = [];
+    const eligible = this.data.nodes.map(n => test(n)
+      && (this.localBaseline || this.s.showPrivate || n.privacy === 'agent-safe'));
+    this.recallFrame = q ? modulateRecall(this.data, q, { eligible }) : null;
+    this.regionRecall = q ? modulateRegions(this.data, this.recallFrame) : null;
     this.map = new Int32Array(this.data.nodes.length).fill(-1);
     this.data.nodes.forEach((n, i) => {
-      if (!test(n)) return;
+      if (!eligible[i]) return;
       /* A first-run baseline is entirely local and is the only dataset available. Enhanced
          payload privacy lanes retain their normal default-deny visibility. */
-      if (!this.localBaseline && !this.s.showPrivate && n.privacy !== 'agent-safe') return;
-      const searchable = [displayTitle(n), n.title, ...(n.aliases || []), ...nodeTopics(n),
-        ...nodeDisplayTags(n), ...(n.facets || []), ...(n.tags || []), n.project, n.area, n.type]
-        .filter(v => typeof v === 'string').join(' ').toLowerCase();
-      if (q && !searchable.includes(q)) return;
+      const recall = this.recallFrame && this.recallFrame.scores[i];
+      if (q && !(recall && recall.selected)) return;
       this.map[i] = keep.length;
       keep.push({
         src: i, d: n, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, hx: 0, hy: 0, hz: 0, deg: 0,
+        recall,
         lane: LANE_INDEX[n.evidence] === undefined ? LANE_INDEX.unknown : LANE_INDEX[n.evidence],
       });
     });
@@ -2027,7 +2639,8 @@ class AetherView extends ItemView {
       facetGapDistinct: this.facetGapDistinct, facetGapUnknown: this.facetGapUnknown,
       ghosts: this.ghosts.length, mode: this.s.connectionMode,
       density: this.s.density, space: this.s.layout, tier: this.s.tierBy, angle: this.s.angleBy,
-      filtered: this.query ? 1 : 0,
+      filtered: this.query ? 1 : 0, recallTokens: this.recallFrame ? this.recallFrame.tokenCount : 0,
+      recallBudget: this.recallFrame ? this.recallFrame.budget : 0,
     });
   }
 
@@ -2035,11 +2648,14 @@ class AetherView extends ItemView {
      keeps. While the camera moves nothing in this function runs again. */
   buildBuffers() {
     const N = this.nodes;
+    const recallPeak = N.reduce((peak, n) => n.recall ? Math.max(peak, n.recall.activation) : peak, 0);
     this.radius = new Float32Array(N.length);
     for (let i = 0; i < N.length; i++) {
       const d = N[i].d;
       const mass = Math.log2((d.mass || 1024) / 1024 + 1);
-      this.radius[i] = clamp(2.6 + mass * 1.05 + Math.sqrt(N[i].deg) * 0.95, 2.6, 17);
+      const recallScale = N[i].recall && recallPeak > 0
+        ? 0.86 + 0.44 * clamp(N[i].recall.activation / recallPeak, 0, 1) : 1;
+      this.radius[i] = clamp((2.6 + mass * 1.05 + Math.sqrt(N[i].deg) * 0.95) * recallScale, 2.6, 19);
     }
     if (!this.gl) return;
 
@@ -2059,8 +2675,10 @@ class AetherView extends ItemView {
       a.style[i * 4 + 1] = clamp(0.46 + (d.corroboration || 1) * 0.13, 0.40, 0.92);
       a.style[i * 4 + 2] = (60 - (d.standing || 0) * 12) / 100;
       /* base alpha folds in the age fade, so opacity stays a real channel with zero cost */
+      const recallAlpha = N[i].recall && recallPeak > 0
+        ? 0.35 + 0.65 * clamp(N[i].recall.activation / recallPeak, 0, 1) : 1;
       a.style[i * 4 + 3] = clamp(0.30 + (d.standing || 0) * 0.9, 0.22, 0.95)
-                         * (1 - (d.age === undefined ? 0.4 : d.age) * 0.5);
+                         * (1 - (d.age === undefined ? 0.4 : d.age) * 0.5) * recallAlpha;
       a.flags[i * 4 + 0] = d.authority_rank === undefined ? 2 : d.authority_rank;
       a.flags[i * 4 + 1] = PRIVACY_CODE[d.privacy] === undefined ? 0 : PRIVACY_CODE[d.privacy];
       a.flags[i * 4 + 2] = d.contested ? 1 : 0;
@@ -2158,6 +2776,12 @@ class AetherView extends ItemView {
     let s = `${this.nodes.length.toLocaleString()} notes · ${this.visibleEdgeCount.toLocaleString()} of `
       + `${this.allEdgeCount.toLocaleString()} connections shown · ${this.explicit.length.toLocaleString()} direct · `
       + `${this.latent.length.toLocaleString()} contextual · ${this.ghosts.length} ghosts`;
+    if (this.recallFrame && this.recallFrame.active) {
+      s += ` · recall working set ${this.recallFrame.workingSet.length}/${this.recallFrame.budget}`;
+      if (this.regionRecall && this.regionRecall.active) {
+        s += ` · regions ${this.regionRecall.recruited}/${this.regionRecall.total} recruited`;
+      }
+    }
     if (this.s.perf) {
       const fps = this.frameMs > 0 ? (1000 / this.frameMs) : 0;
       const drawCalls = this.gl ? 2 : (this.nodes.length + this.explicit.length + this.latent.length);
@@ -2288,7 +2912,7 @@ class AetherView extends ItemView {
   facetStateLabel(edge) {
     if (edge[EDGE.FACET_GAP] === -1) return 'facet unknown';
     if (edge[EDGE.FACET_GAP] !== 1) return '';
-    return this.data && this.data.schema === 'aethergraph.v3'
+    return this.data && (this.data.schema === 'aethergraph.v3' || this.data.schema === 'aethergraph.v4')
       ? 'distinct controlled facets' : 'no shared facet/tag';
   }
 
@@ -2324,7 +2948,8 @@ class AetherView extends ItemView {
     item(this.focus === n ? 'Clear focus' : 'Focus its neighbourhood', 'crosshair',
       () => (this.focus === n ? this.clearSelection() : this.select(n)));
     item('Show details', 'info', () => { this.pinned = n; this.showCard(n); });
-    const facet = (nodeTopics(d)[0] || nodeDisplayTags(d)[0] || (d.facets || [])[0]);
+    const facet = (nodeSubjects(d)[0] || nodeTopics(d)[0] || nodeContexts(d)[0]
+      || nodeDisplayTags(d)[0] || (d.facets || [])[0]);
     if (facet) item(`Filter to “${facet}”`, 'filter', () => this.applyFilter(facet));
     if (d.project) item(`Filter to “${d.project}”`, 'folder', () => this.applyFilter(d.project));
     menu.addSeparator();
@@ -2569,6 +3194,52 @@ class AetherView extends ItemView {
       card.createDiv({ cls: 'ag-card-description', text: d.description.trim() });
     }
 
+    const synthesis = d.synthesis;
+    if (synthesis) {
+      const dynamic = n.recall || null;
+      const frame = this.data.synthesis || {};
+      const regions = regionSummary(frame);
+      const box = card.createDiv({ cls: 'ag-synthesis' });
+      box.createDiv({ cls: 'ag-card-section-title', text: 'memory synthesis · estimate, not truth' });
+      const metrics = box.createDiv({ cls: 'ag-synthesis-metrics' });
+      const metric = (label, score) => {
+        const cell = metrics.createDiv({ cls: 'ag-synthesis-metric' });
+        cell.createDiv({ cls: 'ag-synthesis-score', text: `${Math.round(clamp(score || 0, 0, 1) * 100)}%` });
+        cell.createDiv({ cls: 'ag-card-l', text: label });
+      };
+      metric('importance', synthesis.importance.score);
+      metric(dynamic ? 'task utility' : 'frame utility', dynamic ? dynamic.utility : synthesis.utility.score);
+      metric(dynamic ? 'task activation' : 'rest activation',
+        dynamic ? dynamic.activation : synthesis.activation.score);
+      metric('confidence', synthesis.confidence.score);
+      const detail = box.createDiv({ cls: 'ag-synthesis-detail' });
+      const activation = dynamic || synthesis.activation;
+      detail.createDiv({ text: `activation: direct ${Math.round(activation.direct * 100)}% · propagated `
+        + `${Math.round(activation.propagated * 100)}% · inhibited ${Math.round(activation.inhibited * 100)}%` });
+      detail.createDiv({ text: `support: ${synthesis.support.regions} regions · `
+        + `${synthesis.support.independent} independent · ${synthesis.support.lineages} lineages` });
+      detail.createDiv({ text: `residuals: ${synthesis.residuals.length} · frame ${frame.mode || 'unknown'} · authority ${frame.authority || 'none'}` });
+      box.createDiv({ cls: 'ag-region-status' + (regions.counts.degraded || regions.counts.inactive ? ' is-degraded' : ''),
+        text: `region receipts: ${regions.label}` });
+      if (regions.degraded.length) {
+        box.createDiv({ cls: 'ag-region-degraded', text: regions.degraded.join(' · ') });
+      }
+      if (this.regionRecall && this.regionRecall.active) {
+        const recruited = this.regionRecall.regions.filter(region => region.recruitment > 0).slice(0, 6);
+        box.createDiv({ cls: 'ag-card-term-label ag-region-recruitment-title',
+          text: `task regional recruitment · ${this.regionRecall.recruited}/${this.regionRecall.total}` });
+        if (recruited.length) {
+          const list = box.createDiv({ cls: 'ag-region-recruitment' });
+          for (const region of recruited) {
+            const item = list.createDiv({ cls: 'ag-region-recruitment-item'
+              + (region.status === 'degraded' ? ' is-degraded' : '') });
+            item.createSpan({ text: `${region.id} · ${region.derivationFamily}` });
+            item.createSpan({ text: `${Math.round(region.recruitment * 100)}% · ${region.status}` });
+          }
+        } else box.createDiv({ cls: 'ag-region-degraded', text: 'no region met the task frame' });
+      }
+    }
+
     const rel = card.createDiv({ cls: 'ag-card-rel' });
     const stat = (v, label) => {
       const b = rel.createDiv({ cls: 'ag-card-stat' });
@@ -2619,12 +3290,14 @@ class AetherView extends ItemView {
     row('mass', d.mass ? (d.mass / 1024).toFixed(0) + ' KB' : '—');
     row('entered as', d.evidence || 'unknown');
 
-    /* Cards are summaries, not concordances. The builder's display_tags are the compact,
-       controlled-first projection; keep finer topics searchable without printing all of them. */
-    const terms = nodeDisplayTags(d).length ? nodeDisplayTags(d).slice(0, 3)
-      : nodeTopics(d).length ? nodeTopics(d).slice(0, 3) : (d.facets || []).slice(0, 3);
-    if (terms.length) {
-      const f = card.createDiv({ cls: 'ag-card-facets' });
+    /* Cards are summaries, not concordances. Subjects answer what the document is about;
+       contexts answer when or where it matters. They stay separate so a contextual frame is
+       never mistaken for a document claim. */
+    const chips = (label, terms) => {
+      if (!terms.length) return;
+      const block = label ? card.createDiv({ cls: 'ag-card-term-block' }) : card;
+      if (label) block.createDiv({ cls: 'ag-card-term-label', text: label });
+      const f = block.createDiv({ cls: 'ag-card-facets' + (label ? '' : ' is-legacy') });
       for (const name of terms) {
         const chip = f.createEl('button', { cls: 'ag-chip', text: name });
         chip.setAttr('type', 'button');
@@ -2633,7 +3306,14 @@ class AetherView extends ItemView {
         chip.style.color = `hsl(${hueFor(name)},60%,78%)`;
         chip.onclick = () => this.applyFilter(name);
       }
+    };
+    if (synthesis) {
+      chips('subjects', nodeSubjects(d).slice(0, 4));
+      chips('contexts', nodeContexts(d).slice(0, 4));
     }
+    const terms = nodeDisplayTags(d).length ? nodeDisplayTags(d).slice(0, 3)
+      : nodeTopics(d).length ? nodeTopics(d).slice(0, 3) : (d.facets || []).slice(0, 3);
+    chips(synthesis ? 'document labels' : null, terms);
     if (d.privacy && d.privacy !== 'agent-safe') {
       card.createDiv({ cls: 'ag-tip-priv', text: d.privacy });
     }
@@ -2678,9 +3358,31 @@ class AetherView extends ItemView {
     this.tip.createDiv({ cls: 'ag-tip-meta',
       text: `tier: ${best.tier ? best.tier.label : '—'} · ${d.family || '—'} · ${d.mass ? (d.mass / 1024).toFixed(0) + ' KB' : '—'}` });
     if (d.privacy !== 'agent-safe') this.tip.createDiv({ cls: 'ag-tip-priv', text: d.privacy });
+    const subjects = nodeSubjects(d).slice(0, 3), contexts = nodeContexts(d).slice(0, 3);
+    if (subjects.length) this.tip.createDiv({ cls: 'ag-tip-facets', text: `subjects: ${subjects.join(' · ')}` });
+    if (contexts.length) this.tip.createDiv({ cls: 'ag-tip-contexts', text: `contexts: ${contexts.join(' · ')}` });
     const terms = nodeDisplayTags(d).length ? nodeDisplayTags(d).slice(0, 3)
       : nodeTopics(d).length ? nodeTopics(d).slice(0, 3) : (d.facets || []).slice(0, 3);
     if (terms.length) this.tip.createDiv({ cls: 'ag-tip-facets', text: terms.join(' · ') });
+    if (d.synthesis) {
+      const sy = d.synthesis, dynamic = best.recall || null, regions = regionSummary(this.data.synthesis);
+      this.tip.createDiv({ cls: 'ag-tip-synthesis', text: `synthesis estimate — importance `
+        + `${Math.round(sy.importance.score * 100)}% · task utility `
+        + `${Math.round((dynamic ? dynamic.utility : sy.utility.score) * 100)}% · activation `
+        + `${Math.round((dynamic ? dynamic.activation : sy.activation.score) * 100)}% · confidence `
+        + `${Math.round(sy.confidence.score * 100)}%` });
+      this.tip.createDiv({ cls: 'ag-tip-meta', text: `support ${sy.support.regions} regions / `
+        + `${sy.support.independent} independent · ${sy.residuals.length} residuals` });
+      this.tip.createDiv({ cls: 'ag-region-status' + (regions.counts.degraded || regions.counts.inactive ? ' is-degraded' : ''),
+        text: `region receipts: ${regions.label}` });
+      if (this.regionRecall && this.regionRecall.active) {
+        const recruited = this.regionRecall.regions.filter(region => region.recruitment > 0).slice(0, 3);
+        this.tip.createDiv({ cls: 'ag-tip-meta', text: recruited.length
+          ? `task regions: ${recruited.map(region => `${region.id}/${region.derivationFamily} `
+            + `${Math.round(region.recruitment * 100)}%`).join(' · ')}`
+          : 'task regions: none recruited' });
+      }
+    }
     this.tip.createDiv({ cls: 'ag-tip-meta', text: 'entered as: ' + d.evidence + '  (how it was imported, not how true it is)' });
     this.tip.createDiv({ cls: 'ag-tip-path', text: d.path });
   }
@@ -2713,6 +3415,7 @@ class AetherView extends ItemView {
     const near = this._near;
     const dim = near ? 0.06 : 1;
     const vocab = this.data.facet_vocab || [];
+    const recallPeak = this.nodes.reduce((peak, n) => n.recall ? Math.max(peak, n.recall.activation) : peak, 0);
     this.proj = this.nodes.map(n => this.project(n));
     const fog = (p) => clamp(1 - (p.clipW - this.cam.dist * 0.55) / (this.cam.dist * 2.4), 0.12, 1);
     this.pickHover2D();
@@ -2765,7 +3468,10 @@ class AetherView extends ItemView {
       const n = this.nodes[i], d = n.d, s = this.proj[i];
       if (s.x < -80 || s.y < -80 || s.x > W + 80 || s.y > H + 80) continue;
       const vis = !near || near.has(i);
-      const alpha = (vis ? 1 : dim) * (1 - (d.age === undefined ? 0.4 : d.age) * 0.5) * fog(s);
+      const recallAlpha = n.recall && recallPeak > 0
+        ? 0.35 + 0.65 * clamp(n.recall.activation / recallPeak, 0, 1) : 1;
+      const alpha = (vis ? 1 : dim) * (1 - (d.age === undefined ? 0.4 : d.age) * 0.5)
+        * fog(s) * recallAlpha;
       if (alpha < 0.02) continue;
       const r = clamp(this.radius[i] * s.k, 1.2, 34);
       const sides = FAMILY_SHAPE[d.family] === undefined ? 0 : FAMILY_SHAPE[d.family];
@@ -2857,10 +3563,12 @@ class AetherView extends ItemView {
       let c = cells.get(key);
       if (c === undefined) {
         c = pool[used] || (pool[used] = { n: 0, x: 0, y: 0, w: 0, best: null, bestW: -1,
-          topics: new Map(), facets: new Map(), projects: new Map(), areas: new Map() });
+          subjects: new Map(), topics: new Map(), contexts: new Map(), facets: new Map(),
+          projects: new Map(), areas: new Map() });
         used++;
         c.n = 0; c.x = 0; c.y = 0; c.w = 0; c.best = null; c.bestW = -1;
-        c.topics.clear(); c.facets.clear(); c.projects.clear(); c.areas.clear();
+        c.subjects.clear(); c.topics.clear(); c.contexts.clear(); c.facets.clear();
+        c.projects.clear(); c.areas.clear();
         cells.set(key, c);
       }
       /* weight decides which single note speaks for a singleton cluster, and which clusters
@@ -2868,8 +3576,12 @@ class AetherView extends ItemView {
       const w = (1 + n.deg) * (0.4 + (d.standing || 0)) * (s.k > 0 ? s.k : 0.01);
       c.n++; c.x += s.x; c.y += s.y; c.w += w;
       if (w > c.bestW) { c.bestW = w; c.best = n; c.bestY = s.y + this.radius[i] * s.k + 11; c.bestX = s.x; }
+      const subjects = nodeSubjects(d);
+      for (const subject of subjects) c.subjects.set(subject, (c.subjects.get(subject) || 0) + 1);
       const topics = nodeTopics(d);
       for (const topic of topics) c.topics.set(topic, (c.topics.get(topic) || 0) + 1);
+      const contexts = nodeContexts(d);
+      for (const context of contexts) c.contexts.set(context, (c.contexts.get(context) || 0) + 1);
       const fs = termNames(d.facets);
       for (const facet of fs) c.facets.set(facet, (c.facets.get(facet) || 0) + 1);
       if (d.project) c.projects.set(d.project, (c.projects.get(d.project) || 0) + 1);
@@ -2881,7 +3593,8 @@ class AetherView extends ItemView {
     for (const c of cells.values()) list.push(c);
     list.sort((a, b) => b.w - a.w);
     const budget = Math.min(list.length, 150);
-    const sources = { title: 0, topic: 0, facet: 0, project: 0, area: 0, neutral: 0 };
+    const sources = { title: 0, subject: 0, topic: 0, context: 0, facet: 0,
+      project: 0, area: 0, neutral: 0 };
 
     ctx.textAlign = 'center';
     for (let k = 0; k < budget; k++) {
@@ -2903,12 +3616,16 @@ class AetherView extends ItemView {
           }
           return [bk, bv];
         };
+        const [subject, sn] = top(c.subjects);
         const [topic, tn] = top(c.topics);
+        const [context, cn] = top(c.contexts);
         const [f, fn] = top(c.facets);
         const [p, pn] = top(c.projects);
         const [ar, an] = top(c.areas);
         const threshold = c.n * 0.6;
-        if (topic && tn >= threshold) { text = topic; weight = 2; sources.topic++; }
+        if (subject && sn >= threshold) { text = subject; weight = 2; sources.subject++; }
+        else if (topic && tn >= threshold) { text = topic; weight = 2; sources.topic++; }
+        else if (context && cn >= threshold) { text = context; weight = 2; sources.context++; }
         else if (f && fn >= threshold) { text = f; weight = 2; sources.facet++; }
         else if (p && pn >= threshold) { text = p; weight = 1; sources.project++; }
         else if (ar && an >= threshold) { text = String(ar).replace(/^\d+\s+/, ''); weight = 1; sources.area++; }
@@ -3021,7 +3738,8 @@ class AetherView extends ItemView {
     for (const n of this.nodes) {
       const d = n.d;
       const searchable = [displayTitle(d), d.title, ...(d.aliases || []), ...nodeTopics(d),
-        ...nodeDisplayTags(d), ...(d.facets || []), ...(d.tags || [])]
+        ...nodeDisplayTags(d), ...nodeSubjects(d), ...nodeContexts(d), ...(d.facets || []),
+        ...(d.tags || [])]
         .filter(v => typeof v === 'string').join(' ').toLowerCase();
       if (searchable.includes(t)) { best = n; break; }
     }
@@ -3061,11 +3779,11 @@ module.exports = class Aethergraph extends Plugin {
 
     this.registerView(VIEW_TYPE, leaf => new AetherView(leaf, this));
     this.addRibbonIcon('git-fork', 'Aethergraph', () => this.open());
-    this.addCommand({ id: 'open-aethergraph', name: 'Open Aethergraph', callback: () => this.open() });
+    this.addCommand({ id: 'open', name: 'Open Aethergraph', callback: () => this.open() });
     /* Every toggle is sticky, which is right until a session leaves the view in a state that
        reads as broken — all edges off at full density is a cloud of dots. One command back. */
     this.addCommand({
-      id: 'reset-aethergraph',
+      id: 'reset-view',
       name: 'Reset Aethergraph view to defaults',
       callback: async () => {
         this.settings = Object.assign({}, DEFAULTS);
@@ -3081,12 +3799,12 @@ module.exports = class Aethergraph extends Plugin {
       },
     });
     this.addCommand({
-      id: 'aethergraph-telemetry-report',
+      id: 'diagnostics-report',
       name: 'Write diagnostics report',
       callback: () => this.writeReport(),
     });
     this.addCommand({
-      id: 'aethergraph-telemetry-copy',
+      id: 'copy-diagnostics',
       name: 'Copy diagnostics JSON to clipboard',
       callback: async () => {
         await navigator.clipboard.writeText(JSON.stringify(this.tel.snapshot(), null, 2));
@@ -3094,7 +3812,7 @@ module.exports = class Aethergraph extends Plugin {
       },
     });
     this.addCommand({
-      id: 'aethergraph-telemetry-file',
+      id: 'toggle-diagnostics-file',
       name: 'Toggle diagnostics file logging',
       callback: async () => {
         const next = !this.settings.telemetryFile;
@@ -3111,7 +3829,7 @@ module.exports = class Aethergraph extends Plugin {
       },
     });
     this.addCommand({
-      id: 'aethergraph-diagnose',
+      id: 'run-diagnostics',
       name: 'Run diagnostics',
       callback: () => this.diagnose(),
     });
@@ -3207,7 +3925,6 @@ module.exports = class Aethergraph extends Plugin {
   }
   onunload() {
     if (this.tel) { this.tel.mark('plugin.unload'); this.tel.flush(true); }
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
 };
 
@@ -3307,6 +4024,8 @@ module.exports.__defaults = DEFAULTS;
 module.exports.__tables = { LAYOUTS, TIERS, ANGLE_MODES, DENSITY, CONNECTION_MODES, CONSOLE_LEVELS };
 module.exports.__telemetry = { TEL, Ring, Chan, Telemetry, pseudonym, randomSalt };
 module.exports.__relations = { EDGE, edgePresentation, edgeVisible, displayTitle, termNames, nodeTopics,
-  nodeDisplayTags, clipLabel, vocabLabel };
+  nodeDisplayTags, nodeSubjects, nodeContexts, clipLabel, vocabLabel };
+module.exports.__synthesis = { recallTokens, directRecallFit, modulateRecall, modulateRegions, regionSummary,
+  validateNodeSynthesis, validateTopSynthesis };
 module.exports.__payload = { PAYLOADS, PAYLOAD_LIMITS, validatePayload, readEnhancedPayload,
   buildBaselinePayload };

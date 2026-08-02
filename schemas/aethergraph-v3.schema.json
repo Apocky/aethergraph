@@ -62,7 +62,13 @@
       "$ref": "#/$defs/vocabulary"
     },
     "reason_vocab": {
-      "$ref": "#/$defs/vocabulary"
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "type": "string" },
+          { "$ref": "#/$defs/reason" }
+        ]
+      }
     },
     "presentation_vocab": {
       "type": "array",
@@ -103,6 +109,16 @@
         "type": "string"
       },
       "uniqueItems": true
+    },
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "basis", "evidence"],
+      "properties": {
+        "label": { "type": "string" },
+        "basis": { "$ref": "#/$defs/stringArray" },
+        "evidence": { "type": "string" }
+      }
     },
     "node": {
       "type": "object",
@@ -162,17 +178,27 @@
         "facets": { "$ref": "#/$defs/stringArray" },
         "tags": { "$ref": "#/$defs/stringArray" },
         "aliases": { "$ref": "#/$defs/stringArray" },
-        "evidence": { "$ref": "#/$defs/stringArray" },
+        "evidence": { "type": "string" },
         "privacy": { "type": "string", "minLength": 1 },
         "withhold_from_telemetry": { "type": "boolean" },
         "authority": { "$ref": "#/$defs/nullableString" },
         "source_path": { "$ref": "#/$defs/nullableString" },
         "source_sha256": { "$ref": "#/$defs/nullableString" },
         "source_commit": { "$ref": "#/$defs/nullableString" },
-        "source_tree_dirty": { "type": "boolean" },
+        "source_tree_dirty": { "type": ["boolean", "null"] },
         "hand_authored": { "type": "boolean" },
-        "standing": { "$ref": "#/$defs/nullableString" },
-        "standing_parts": { "$ref": "#/$defs/stringArray" },
+        "standing": { "type": "number", "minimum": 0, "maximum": 1 },
+        "standing_parts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provenance", "corroboration", "load", "contested"],
+          "properties": {
+            "provenance": { "type": "number", "minimum": 0, "maximum": 1 },
+            "corroboration": { "type": "integer", "minimum": 0 },
+            "load": { "type": "integer", "minimum": 0 },
+            "contested": { "type": "boolean" }
+          }
+        },
         "corroboration": { "type": "integer", "minimum": 0 },
         "load": { "type": "number", "minimum": 0 },
         "contested": { "type": "boolean" },
@@ -223,7 +249,7 @@
             "required": ["n", "w"],
             "properties": {
               "n": { "type": "integer", "minimum": 0 },
-              "w": { "type": "number" }
+              "w": { "type": "number", "minimum": 0, "maximum": 1000000000 }
             }
           }
         }

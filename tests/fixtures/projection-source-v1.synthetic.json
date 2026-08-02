@@ -1,0 +1,53 @@
+{
+  "schema": "aethergraph.projection-source.v1",
+  "provider_id": "synthetic-context",
+  "observed_at": "2026-08-02T00:00:00Z",
+  "status": "active",
+  "authority": "read_only",
+  "derivation_family": "synthetic-structural",
+  "base": {
+    "agent_index_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "graph_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "source_snapshot_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "omissions": [],
+  "contributions": [
+    {
+      "kind": "node",
+      "id": "synthetic-node-1",
+      "node": "synthetic-focus",
+      "subjects": [["graph-structure", 0.92]],
+      "contexts": [["structural", 0.8]],
+      "relevance": 0,
+      "importance": 0.84,
+      "utility": null,
+      "confidence": 0.9,
+      "evidence": "reported",
+      "lineage_ids": ["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],
+      "as_of": "2026-08-02T00:00:00Z"
+    },
+    {
+      "kind": "edge",
+      "id": "synthetic-edge-1",
+      "a": "synthetic-primary",
+      "b": "synthetic-context",
+      "relation": "supports",
+      "score": 0.9,
+      "confidence": 0.9,
+      "evidence": "verified-source",
+      "lineage_ids": ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+      "as_of": "2026-08-02T00:00:00Z",
+      "status": "active"
+    },
+    {
+      "kind": "residual",
+      "id": "synthetic-residual-1",
+      "nodes": ["synthetic-focus"],
+      "code": "coverage-gap",
+      "severity": 0.2,
+      "evidence": "inferred",
+      "lineage_ids": ["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+      "as_of": "2026-08-02T00:00:00Z"
+    }
+  ]
+}
