@@ -1,0 +1,16 @@
+{
+  "name": "aethergraph",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Public-boundary checks for the Aethergraph Obsidian plugin.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test",
+    "check:public": "node scripts/check-public-boundary.mjs",
+    "check:release": "node scripts/check-public-boundary.mjs --release"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

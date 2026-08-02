@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Apocky/aethergraph/blob/main/schemas/aethergraph-v3.schema.json",
+  "title": "Aethergraph v3 payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "observed_at",
+    "counts",
+    "legend",
+    "nodes",
+    "edge_fields",
+    "facet_vocab",
+    "reason_vocab",
+    "presentation_vocab",
+    "explicit",
+    "latent",
+    "ghosts",
+    "severed"
+  ],
+  "properties": {
+    "schema": {
+      "const": "aethergraph.v3"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "legend": {
+      "type": "object"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "edge_fields": {
+      "const": [
+        "a",
+        "b",
+        "weight",
+        "facet",
+        "reach",
+        "span",
+        "facet_gap",
+        "relevance",
+        "reason",
+        "signals",
+        "presentation"
+      ]
+    },
+    "facet_vocab": {
+      "$ref": "#/$defs/vocabulary"
+    },
+    "reason_vocab": {
+      "$ref": "#/$defs/vocabulary"
+    },
+    "presentation_vocab": {
+      "type": "array",
+      "const": ["primary", "context", "archive"]
+    },
+    "explicit": {
+      "$ref": "#/$defs/edges"
+    },
+    "latent": {
+      "$ref": "#/$defs/edges"
+    },
+    "ghosts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ghost"
+      }
+    },
+    "severed": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/severed"
+      }
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "vocabulary": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "display_title",
+        "display_title_source",
+        "label_source",
+        "topics",
+        "display_tags",
+        "path",
+        "type",
+        "project",
+        "area",
+        "label_area",
+        "role",
+        "facets",
+        "tags",
+        "aliases",
+        "evidence",
+        "privacy",
+        "withhold_from_telemetry",
+        "authority",
+        "source_path",
+        "source_sha256",
+        "source_commit",
+        "source_tree_dirty",
+        "hand_authored",
+        "standing",
+        "standing_parts",
+        "corroboration",
+        "load",
+        "contested",
+        "authority_rank",
+        "hybridity",
+        "family",
+        "view_scope",
+        "mass",
+        "age"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "display_title": { "type": "string" },
+        "display_title_source": { "type": "string" },
+        "label_source": { "type": "string" },
+        "topics": { "$ref": "#/$defs/stringArray" },
+        "display_tags": { "$ref": "#/$defs/stringArray" },
+        "path": { "type": "string" },
+        "type": { "$ref": "#/$defs/nullableString" },
+        "project": { "$ref": "#/$defs/nullableString" },
+        "area": { "$ref": "#/$defs/nullableString" },
+        "label_area": { "$ref": "#/$defs/nullableString" },
+        "role": { "$ref": "#/$defs/nullableString" },
+        "facets": { "$ref": "#/$defs/stringArray" },
+        "tags": { "$ref": "#/$defs/stringArray" },
+        "aliases": { "$ref": "#/$defs/stringArray" },
+        "evidence": { "$ref": "#/$defs/stringArray" },
+        "privacy": { "type": "string", "minLength": 1 },
+        "withhold_from_telemetry": { "type": "boolean" },
+        "authority": { "$ref": "#/$defs/nullableString" },
+        "source_path": { "$ref": "#/$defs/nullableString" },
+        "source_sha256": { "$ref": "#/$defs/nullableString" },
+        "source_commit": { "$ref": "#/$defs/nullableString" },
+        "source_tree_dirty": { "type": "boolean" },
+        "hand_authored": { "type": "boolean" },
+        "standing": { "$ref": "#/$defs/nullableString" },
+        "standing_parts": { "$ref": "#/$defs/stringArray" },
+        "corroboration": { "type": "integer", "minimum": 0 },
+        "load": { "type": "number", "minimum": 0 },
+        "contested": { "type": "boolean" },
+        "authority_rank": { "type": "integer", "minimum": 0 },
+        "hybridity": { "type": "number", "minimum": 0 },
+        "family": { "$ref": "#/$defs/nullableString" },
+        "view_scope": { "enum": ["core", "corpus", "all"] },
+        "mass": { "type": "number", "minimum": 0 },
+        "age": { "type": "number", "minimum": 0 }
+      }
+    },
+    "edge": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "prefixItems": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "integer", "minimum": 0 },
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number" },
+        { "enum": [-1, 0, 1] },
+        { "type": "number" },
+        { "type": "integer", "minimum": 0 },
+        { "type": "integer", "minimum": 0 },
+        { "enum": ["primary", "context", "archive"] }
+      ]
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/edge"
+      }
+    },
+    "ghost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "docs", "anchors"],
+      "properties": {
+        "name": { "type": "string" },
+        "docs": { "type": "integer", "minimum": 0 },
+        "anchors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["n", "w"],
+            "properties": {
+              "n": { "type": "integer", "minimum": 0 },
+              "w": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "severed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pair", "shared_areas", "curated"],
+      "properties": {
+        "pair": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "string" }
+        },
+        "shared_areas": { "type": "integer", "minimum": 0 },
+        "curated": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "type": ["string", "null"] },
+            { "type": ["string", "null"] }
+          ]
+        }
+      }
+    }
+  }
+}

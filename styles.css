@@ -1,0 +1,357 @@
+/* Aethergraph — low chrome, with Obsidian theme tokens owning all interactive surfaces. */
+
+.aethergraph-root {
+  --ag-graph-bg: color-mix(in srgb, var(--background-primary, #0c1017) 72%, #05070a 28%);
+  --ag-surface: color-mix(in srgb, var(--background-primary-alt, #151b26) 88%, transparent);
+  --ag-surface-solid: var(--background-primary-alt, #151b26);
+  --ag-field: var(--background-modifier-form-field, #1a212e);
+  --ag-text: var(--text-normal, #dce8fb);
+  --ag-muted: var(--text-muted, #aab9d7);
+  --ag-faint: var(--text-faint, #8490a8);
+  --ag-border: var(--background-modifier-border, rgba(140, 160, 200, 0.22));
+  --ag-border-hover: var(--background-modifier-border-hover, rgba(160, 200, 255, 0.5));
+  --ag-accent: var(--interactive-accent, #6096e8);
+  --ag-accent-hover: var(--interactive-accent-hover, #78b4ff);
+  --ag-focus: var(--color-accent, #96c8ff);
+  color: var(--ag-text);
+  position: relative;
+  padding: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 50% 45%,
+      color-mix(in srgb, var(--ag-graph-bg) 82%, var(--ag-accent) 18%) 0%,
+      var(--ag-graph-bg) 62%, color-mix(in srgb, var(--ag-graph-bg) 88%, #000 12%) 100%);
+}
+
+/* Two stacked surfaces: WebGL2 underneath for the graph, canvas 2D on top for glyphs, dash
+   patterns and tier rings. Both are driven by the same camera matrix. The stack itself takes
+   the pointer events so neither canvas can steal them from the other. */
+.aethergraph-stack {
+  position: relative;
+  cursor: grab;
+  touch-action: none;
+}
+.aethergraph-stack:active { cursor: grabbing; }
+.aethergraph-stack:focus-visible {
+  outline: 2px solid var(--ag-focus);
+  outline-offset: -2px;
+}
+
+.aethergraph-canvas { display: block; }
+.aethergraph-canvas.ag-gl { position: absolute; inset: 0; }
+.aethergraph-canvas.ag-2d { position: relative; pointer-events: none; }
+
+.aethergraph-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  min-height: 40px;
+  box-sizing: border-box;
+  background: var(--ag-surface);
+  border-bottom: 1px solid var(--ag-border);
+  backdrop-filter: blur(6px);
+}
+
+.ag-ctl { display: flex; align-items: center; gap: 6px; }
+
+.ag-lbl {
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ag-muted);
+}
+
+.aethergraph-bar select,
+.ag-search {
+  background: var(--ag-field);
+  color: var(--ag-text);
+  border: 1px solid var(--ag-border);
+  border-radius: 5px;
+  font-size: 12px;
+  padding: 3px 7px;
+  outline: none;
+}
+.ag-search { width: 140px; }
+.ag-search:focus { border-color: var(--ag-accent-hover); }
+
+.aethergraph-bar select:focus-visible,
+.ag-search:focus-visible,
+.ag-tog:focus-visible,
+.ag-chip:focus-visible,
+.ag-p-btn:focus-visible,
+.ag-p-x:focus-visible,
+.ag-connection-title:focus-visible,
+.ag-card-more:focus-visible {
+  outline: 2px solid var(--ag-focus);
+  outline-offset: 2px;
+}
+
+.ag-toggles { gap: 4px; }
+
+.ag-tog {
+  background: transparent;
+  border: 1px solid var(--ag-border);
+  color: var(--ag-muted);
+  border-radius: 999px;
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  padding: 2px 9px;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.ag-tog:hover { border-color: var(--ag-border-hover); color: var(--ag-text); }
+.ag-tog.is-on {
+  background: color-mix(in srgb, var(--ag-accent) 22%, transparent);
+  border-color: var(--ag-accent-hover);
+  color: var(--ag-text);
+}
+
+.aethergraph-info {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--ag-faint);
+  pointer-events: none;
+}
+
+.aethergraph-tip {
+  position: absolute;
+  z-index: 20;
+  max-width: 340px;
+  padding: 8px 11px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--ag-surface-solid) 96%, transparent);
+  border: 1px solid var(--ag-border);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ag-tip-title { font-weight: 600; color: var(--ag-text); margin-bottom: 2px; }
+.ag-tip-meta { font-size: 10.5px; color: var(--ag-muted); }
+.ag-tip-lane { font-size: 10.5px; margin-top: 3px; }
+.ag-tip-priv {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #f0b45a;
+  border: 1px dashed rgba(240, 180, 90, 0.6);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+.ag-tip-facets { margin-top: 4px; font-size: 10.5px; color: rgba(196, 160, 240, 0.85); }
+
+/* ---------------------------------------------------------------- selection card
+   Pinned by a click. Sits bottom-left so it does not fight the telemetry panel on the right
+   or the toolbar on top. */
+.ag-card {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 18;
+  width: min(360px, calc(100% - 24px));
+  max-height: calc(100% - 100px);
+  overflow-y: auto;
+  padding: 11px 13px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ag-surface-solid) 96%, transparent);
+  border: 1px solid var(--ag-border);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ag-text);
+}
+.ag-card-head { display: flex; align-items: flex-start; gap: 8px; }
+.ag-card-title { font-weight: 600; font-size: 13px; color: var(--ag-text); flex: 1; line-height: 1.35; }
+.ag-card-sub { font-size: 10.5px; color: var(--ag-muted); margin-bottom: 9px; }
+.ag-card-description {
+  margin: -4px 0 9px;
+  color: rgba(212, 222, 240, 0.86);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ag-card-rel { display: flex; gap: 6px; margin-bottom: 10px; }
+.ag-card-stat {
+  flex: 1; text-align: center; padding: 5px 2px 4px;
+  border-radius: 6px; background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.ag-card-n { font-size: 16px; font-weight: 600; color: #e6edfa; line-height: 1.15; }
+.ag-card-l { font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: rgba(165, 180, 210, 0.6); }
+
+.ag-card-connection-section {
+  margin: 2px 0 10px;
+  padding: 8px 0 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.ag-card-section-title {
+  margin-bottom: 5px;
+  color: rgba(174, 194, 226, 0.72);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ag-card-connections { list-style: none; margin: 0; padding: 0; }
+.ag-connection { padding: 4px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.035); }
+.ag-connection:last-child { border-bottom: none; }
+.ag-connection-title {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #dce8fb;
+  text-align: left;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ag-connection-title:hover { color: #fff; text-decoration: underline; }
+.ag-connection-meta { display: flex; flex-wrap: wrap; gap: 2px 7px; color: rgba(165, 181, 208, 0.64); font-size: 9.5px; }
+.ag-facet-state { color: rgba(170, 180, 196, 0.7); font-style: italic; }
+.ag-card-empty { color: rgba(170, 185, 215, 0.58); font-size: 10px; }
+.ag-card-more {
+  margin-top: 6px;
+  padding: 2px 8px;
+  border: 1px solid rgba(135, 165, 205, 0.3);
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(200, 216, 240, 0.82);
+  font-size: 9.5px;
+  cursor: pointer;
+}
+
+.ag-card-facets { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 6px; }
+.ag-chip {
+  background: transparent; font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid rgba(150, 175, 220, 0.4); cursor: pointer;
+  transition: background 120ms ease;
+}
+.ag-chip:hover { background: rgba(255, 255, 255, 0.08); }
+
+.ag-card-path {
+  margin-top: 7px; font-size: 9.5px; color: rgba(150, 165, 195, 0.5); word-break: break-all;
+}
+.ag-card-acts {
+  display: flex; gap: 6px; margin-top: 10px; padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.ag-p-btn.is-primary {
+  background: rgba(96, 150, 232, 0.32); border-color: rgba(140, 195, 255, 0.62); color: #eef4ff;
+}
+
+/* ---------------------------------------------------------------- telemetry panel
+   Deliberately narrow and scrollable: it sits over the graph, so it must be readable
+   without becoming the view. */
+.ag-panel {
+  position: absolute;
+  top: 48px;
+  right: 12px;
+  z-index: 15;
+  width: 330px;
+  max-height: calc(100% - 108px);
+  overflow-y: auto;
+  padding: 10px 12px 8px;
+  border-radius: 8px;
+  background: rgba(10, 14, 21, 0.93);
+  border: 1px solid rgba(150, 175, 220, 0.22);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  font-size: 11px;
+  line-height: 1.5;
+  color: #cfd8ea;
+}
+.ag-p-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ag-p-title {
+  font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: rgba(180, 200, 235, 0.9); font-weight: 600;
+}
+.ag-p-dim { color: rgba(160, 175, 205, 0.55); font-size: 10px; }
+.ag-p-head .ag-p-dim { margin-left: auto; }
+.ag-p-x {
+  background: none; border: none; color: rgba(170, 185, 215, 0.6);
+  font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px;
+}
+.ag-p-x:hover { color: #e6edfa; }
+
+.ag-p-hero { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.ag-p-fps { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+.ag-p-fps.good { color: #7ef0c0; }
+.ag-p-fps.ok   { color: #f0c27e; }
+.ag-p-fps.bad  { color: #f2748c; }
+
+.ag-p-sec { margin-top: 11px; }
+.ag-p-h {
+  font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: rgba(150, 170, 205, 0.5); margin-bottom: 4px;
+}
+.ag-p-h.ag-p-err { color: #f2748c; }
+
+.ag-p-bar {
+  display: flex; height: 9px; border-radius: 5px; overflow: hidden;
+  background: rgba(255, 255, 255, 0.05); margin-bottom: 5px;
+}
+.ag-p-seg { height: 100%; min-width: 1px; }
+.ag-p-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 4px; }
+.ag-p-key { display: inline-flex; align-items: center; gap: 4px; font-size: 9.5px; color: rgba(175, 190, 215, 0.75); }
+.ag-p-dot { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+
+.ag-p-kv { display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; }
+.ag-p-k { color: rgba(160, 175, 205, 0.55); font-size: 10px; }
+.ag-p-v { color: #d6e2f5; font-size: 10px; text-align: right; word-break: break-word; }
+
+.ag-p-row {
+  font-size: 10px; color: rgba(185, 198, 222, 0.8);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding: 1px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.035);
+}
+.ag-p-warn {
+  font-size: 10px; padding: 3px 6px; margin-bottom: 3px; border-radius: 4px;
+  border-left: 2px solid #f0c27e; background: rgba(240, 194, 126, 0.09); color: #eddcc0;
+}
+.ag-p-fatal { border-left-color: #f2748c; background: rgba(242, 116, 140, 0.11); color: #f6ccd5; }
+.ag-p-degraded { border-left-color: #f0c27e; }
+
+.ag-p-foot {
+  margin-top: 12px; padding-top: 8px; display: flex; align-items: center; gap: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.ag-p-foot .ag-p-dim { flex: 1; word-break: break-all; }
+.ag-p-btn {
+  background: rgba(96, 150, 232, 0.16); border: 1px solid rgba(120, 180, 255, 0.4);
+  color: #dce8fb; border-radius: 999px; font-size: 10px; padding: 2px 9px; cursor: pointer;
+}
+.ag-p-btn:hover { background: rgba(96, 150, 232, 0.3); }
+.ag-tip-path {
+  margin-top: 5px;
+  font-size: 9.5px;
+  color: rgba(150, 165, 195, 0.45);
+  word-break: break-all;
+}
+
+.ag-tip-description { margin: 4px 0; color: rgba(214, 223, 239, 0.82); }
+
+@media (max-width: 760px) {
+  .aethergraph-bar { gap: 7px; padding: 5px 8px; }
+  .ag-lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .ag-search { width: 110px; }
+  .ag-card { left: 8px; bottom: 8px; width: calc(100% - 16px); max-height: calc(100% - 84px); }
+  .aethergraph-info { right: 8px; bottom: 6px; max-width: calc(100% - 16px); text-align: right; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-tog,
+  .ag-chip,
+  .ag-p-btn { transition: none; }
+}

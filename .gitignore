@@ -1,0 +1,12 @@
+node_modules/
+coverage/
+dist/
+release/
+*.zip
+*.tgz
+*.log
+.env
+.env.*
+data.json
+.DS_Store
+Thumbs.db
