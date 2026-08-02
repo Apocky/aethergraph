@@ -1,11 +1,12 @@
 {
   "name": "aethergraph",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Local-first Obsidian graph renderer and deterministic offline synthesis tools.",
-  "type": "module",
   "license": "MIT",
   "scripts": {
+    "build": "esbuild src/main.js --bundle --external:obsidian --format=cjs --platform=node --target=es2018 --minify --outfile=main.js",
+    "dev": "esbuild src/main.js --bundle --external:obsidian --format=cjs --platform=node --target=es2018 --sourcemap=inline --outfile=main.js --watch",
     "test": "node --test",
     "synthesize": "node tools/synthesize.mjs",
     "check:public": "node scripts/check-public-boundary.mjs",
@@ -13,5 +14,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.9"
   }
 }

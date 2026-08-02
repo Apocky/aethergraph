@@ -2,7 +2,7 @@
 
 Aethergraph is a local-first Obsidian graph view designed to show fewer, clearer, and more explainable relationships between notes.
 
-Version 0.2.0 is a public desktop beta. It contains plugin code, an offline synthesis tool, schemas, and synthetic test data only—never a user's vault, generated graph, provider projection, settings, diagnostic state, or repository history from another project.
+Version 0.3.0 is a public desktop release. It contains plugin source, reproducible release tooling, an offline synthesis tool, schemas, and synthetic test data only—never a user's vault, generated graph, provider projection, settings, or repository history from another project.
 
 ## What makes a connection meaningful
 
@@ -15,6 +15,10 @@ Displayed connections can combine several local signals, including explicit link
 - **Archive** — lower-priority or historical relationships available when broader recall is useful.
 
 The interface can progressively reveal these tiers instead of drawing every candidate edge at once. A connection score is a ranking aid, not a claim of truth, authorship, consent, or publication authority.
+
+Large MOCs and indexes remain complete, searchable document collections without dominating the canvas. Aethergraph keeps every typed relationship available in the connection browser, while deterministically limiting structural hub spokes to 24 Context or 12 Archive representatives per hub. Primary relationships are never hub-capped. The status line distinguishes **visualized** relationships from the complete **typed** count.
+
+At broad zoom levels, nearby notes pool into soft semantic light regions with one crisp representative label. Labels are selected from document-grounded subjects, topics, tags, and facets using visible-corpus specificity; structural folder contexts cannot become repeated topical headings. Labels are globally deduplicated, measured for collision, and limited to an adaptive 18–48 per viewport. Zooming in resolves pools back toward individual document titles.
 
 On first run, no generator is required: Aethergraph builds an in-memory graph from Obsidian's metadata cache and shows only authored note links. Frontmatter titles and H1 headings improve labels; tags remain labels and search metadata, but shared tags alone never create a connection. An optional validated `aethergraph.v3` or `aethergraph.v4` payload at `.aethergraph/aethergraph.json` can add qualified semantic and contextual relations.
 
@@ -30,22 +34,34 @@ V4 adds an offline modulation organ rather than a flat database merge. It produc
 
 Projection sources contribute typed metadata tied to stable document IDs and exact base hashes. They do not send prose prompts or recalled document bodies into the renderer. Projection-only relationships are emitted only as Context or Archive; the synthesizer never upgrades them to Primary.
 
-Typing into the plugin's **recall** field activates direct matches and spreads bounded activation through one hop of typed relationships. Primary connections carry more activation than Context, and Archive carries the least. An adaptive deterministic working-set budget stays within the declared resting limit and suppresses the long tail. The query text remains only in the open view and is not written to settings, payloads, or diagnostics; local diagnostics may record its length and resulting hit count when explicitly enabled.
+Typing into the plugin's **recall** field activates direct matches and spreads bounded activation through one hop of typed relationships. Primary connections carry more activation than Context, and Archive carries the least. An adaptive deterministic working-set budget stays within the declared resting limit and suppresses the long tail. The query text remains only in the open view and is not written to settings or payloads.
 
-## Install the public beta
+## Install
+
+After Aethergraph is approved in the Obsidian community directory, install it from **Settings → Community plugins → Browse** and search for **Aethergraph**.
+
+For the current release package:
 
 1. Download the release archive from the [GitHub releases page](https://github.com/Apocky/aethergraph/releases).
 2. Extract it into `<your-vault>/.obsidian/plugins/aethergraph/`.
 3. Confirm that `main.js`, `manifest.json`, and `styles.css` are directly inside that directory.
 4. In Obsidian, open **Settings → Community plugins**, reload installed plugins, and enable **Aethergraph**.
 
-The beta is desktop-only while mobile behavior remains unverified. Back up important vaults and test the plugin on a copy before relying on it in a primary workspace.
+The release is desktop-only while mobile behavior remains unverified. Back up important vaults and test the plugin on a copy before relying on it in a primary workspace.
 
-## Local data and diagnostics
+## Local data and privacy
 
-Aethergraph reads graph inputs inside Obsidian and renders them locally. It does not require an account and does not send analytics or diagnostics to a remote service.
+Aethergraph reads graph inputs inside Obsidian and renders them locally. It does not require an account, make network requests, implement analytics, or collect client telemetry.
 
-Diagnostics are off by default. Explicitly enabling them creates only a bounded local diagnostic stream. References are locally salted, and note bodies, titles, tags, and source paths are not diagnostic fields. Unknown privacy lanes and nodes marked `withhold_from_telemetry` receive no stable diagnostic reference. See [PRIVACY.md](PRIVACY.md) for the full boundary.
+The **Check graph health** command reads current renderer and payload state on demand, displays a transient Obsidian notice, and writes nothing. The legacy `withhold_from_telemetry` payload field is retained for schema compatibility and is treated as an additional exclusion from machine-ingest exports; the plugin has no telemetry subsystem. See [PRIVACY.md](PRIVACY.md) for the full boundary.
+
+## Navigation
+
+- Single-click a node to focus it and inspect its evidence.
+- Double-click or Ctrl/Cmd-click a node to open the exact vault file.
+- Connection titles and displayed paths open their exact Markdown targets; the adjacent **Focus** button stays in the graph.
+- **Browse all typed connections** opens a searchable, incremental list, including relationships omitted from the visual budget.
+- Heading and block fragments such as `Note.md#Heading` or `Note.md#^block-id` are preserved when a payload supplies them. Missing or unsafe targets fail closed with a notice.
 
 ## Aethergraph v3 and v4 data models
 
@@ -102,11 +118,13 @@ Run the built-in help for every accepted option:
 npm run synthesize -- --help
 ```
 
-## Development checks
+## Development
 
-The repository intentionally has no runtime npm dependencies. Node.js 20 or newer is sufficient.
+The repository has no runtime npm dependencies. Node.js 20 or newer is sufficient. `main.js` is a minified release artifact and is intentionally not committed.
 
 ```powershell
+npm ci
+npm run build
 npm test
 npm run check:public
 npm run check:release
@@ -116,7 +134,7 @@ npm run check:release
 
 ## Status and limitations
 
-- Public beta: interfaces and ranking behavior may change.
+- Public release: interfaces and ranking behavior may change before 1.0.
 - Desktop only until mobile behavior is tested.
 - Labels and topics remain only as good as the source document metadata and local extraction.
 - Semantic relevance is probabilistic; inspect the displayed reasons before acting on a connection.

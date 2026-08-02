@@ -70,6 +70,21 @@ test("legacy basic UTC offsets are canonicalized at the v4 boundary", async () =
   assert.equal(output.synthesis.regions[0].observed_at, "2026-08-02T19:08:33Z");
 });
 
+test("ungrounded base topics remain search labels and do not become synthesized subjects", async () => {
+  const graph = await fixture("aethergraph-v3.synthetic.json");
+  const target = graph.nodes.find((node) => node.id === "synthetic-focus");
+  target.label_source = "none";
+  target.topics = ["ungrounded-list-vocabulary"];
+  target.facets = ["declared-facet"];
+  const output = synthesizeGraph(synthesisOptions(graph, []));
+  const node = output.nodes.find((item) => item.id === "synthetic-focus");
+  const subjects = new Set(node.synthesis.subjects.map(([term]) => term));
+  assert.equal(subjects.has("ungrounded-list-vocabulary"), false);
+  assert.equal(subjects.has("declared-facet"), true);
+  assert.deepEqual(node.topics, ["ungrounded-list-vocabulary"],
+    "the source label remains available for local search and inspection");
+});
+
 test("malformed, stale, and private-target providers are isolated as degraded regions", async () => {
   const graph = await fixture("aethergraph-v3.synthetic.json");
   const template = await fixture("projection-source-v1.synthetic.json");

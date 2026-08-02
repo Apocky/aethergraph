@@ -33,24 +33,18 @@
  *
  * Standing is NOT certainty. See README.
  *
- * No build step or bundled third-party dependency. An optional enhanced v3 payload can add
+ * The production bundle has no runtime third-party dependency. An optional enhanced v3 or v4 payload can add
  * qualified semantic relations; without one, Aethergraph builds a local authored-link graph
  * from Obsidian's metadata cache.
  */
 
-const { Plugin, ItemView, Notice, PluginSettingTab, Setting, Menu } = require('obsidian');
+const { Plugin, ItemView, Notice, PluginSettingTab, Setting, Menu, Modal, TFile } = require('obsidian');
 
 /* ==================================================================================
  * RENDERER — WebGL2. Inlined deliberately.
  *
- * This lived in a separate gl.js and `require('./gl.js')` looked reasonable. It is not:
- * Obsidian evaluates a plugin's main.js through its own wrapper, and a relative require
- * does NOT resolve against the plugin folder. The renderer silently failed to load, the
- * camera matrix came back null, and every frame threw behind a blank canvas while the
- * chrome and status line — plain DOM — kept rendering as if all were well.
- *
- * "No build step" is only true for a plugin that is ONE file. That is the constraint, so
- * this is one file. Nothing below is loaded, resolved, or bundled at runtime.
+ * This once lived in a separate runtime gl.js. The release build now bundles it into the
+ * single main.js that Obsidian loads, so no relative runtime module resolution is required.
  * ================================================================================== */
 
 /*
@@ -84,8 +78,8 @@ const { Plugin, ItemView, Notice, PluginSettingTab, Setting, Menu } = require('o
  *   cursor against every node in JS. O(1) rather than O(n), and pixel-exact against the same
  *   shapes that were actually drawn.
  *
- * No build step and no dependencies: raw WebGL2 is plain JavaScript and Obsidian runs on
- * Electron/Chromium, where it is available natively. Only a *library* would need bundling.
+ * Raw WebGL2 uses Electron/Chromium directly; the build only packages source and minifies the
+ * release. No renderer library or runtime dependency ships with the plugin.
  *
  * Text is deliberately not drawn here — glyphs in GL mean atlases and look worse than the
  * browser's own rasteriser. Labels go on a 2D overlay canvas driven by the same matrix, which
@@ -156,7 +150,7 @@ void main() {
   v_hue = i_hue; v_style = i_style; v_flags = i_flags;
   v_index = i_index;
   v_dim = nd.w;
-  v_fog = clamp(1.0 - (clip.w - u_fog.x) / max(u_fog.y, 1.0), 0.10, 1.0);
+  v_fog = clamp(1.0 - (clip.w - u_fog.x) / max(u_fog.y, 1.0), 0.18, 1.0);
 }`;
 
 const NODE_FS = `#version 300 es
@@ -331,7 +325,7 @@ void main() {
     a += pulse * 0.40 * v_dim;
   }
   if (facetGap > 0.5) a *= 0.46;
-  else if (untypedFacet > 0.5) a *= 0.32;
+  else if (untypedFacet > 0.5) a *= 0.72;
   if (a < 0.004) discard;
   outColor = vec4(col, a);
 }`;
@@ -465,8 +459,6 @@ class GLRenderer {
       this.canvas.width = W; this.canvas.height = H;
       this.pickSize = [0, 0];
     }
-    this.canvas.style.width = w + 'px';
-    this.canvas.style.height = h + 'px';
   }
 
   _bindPos(loc) {
@@ -641,380 +633,6 @@ function projectWith(vp, p, W, H, out) {
 }
 
 const GL = { GLRenderer, mat4Mul, perspective, orbitView, projectWith, TEXW };
-
-/* ==================================================================================
- * TELEMETRY
- *
- * Written because this plugin has already shipped three defects that were invisible from
- * the inside: a sign-flipped camera that rendered a plausible but wrong picture, edge widths
- * that piled into sheets of colour, and a renderer that failed to load behind a perfectly
- * healthy toolbar. Every one was found by instrumenting, never by looking. So: measure the
- * frame, name the phase that costs, keep the slow ones, and record what actually happened.
- *
- * PRIVACY. A vault may contain `private-local` material. Diagnostics that record what
- * you hover and open necessarily records note identity, so it honours the lanes the vault
- * already defines rather than inventing a second policy: known lanes are represented only by
- * a salted local pseudonym plus the lane name; anything
- * explicitly marked `withhold_from_telemetry` is not recorded at all, in any form. The salt
- * persists in plugin data and never
- * appears in a log. This is pseudonymisation, not encryption — a hash is only as private as
- * the salt, and anyone holding both the log and the vault could confirm a guess. It exists so
- * the log does not *contain* private strings, which is the property that matters when a file
- * gets copied somewhere it shouldn't be.
- *
- * COST. The whole apparatus must not become the thing it measures. Recording a frame is six
- * writes into preallocated Float64Arrays. Percentiles are computed only when the panel is
- * visible, at 4 Hz, over a copy. Nothing allocates per frame. The event stream touches disk
- * only when the file sink is switched on, and then only in batches.
- * ================================================================================== */
-
-const TEL = {
-  SCHEMA: 'aethergraph.telemetry.v1',
-  FRAMES: 900,          /* ~15 s at 60 fps — long enough for p99 to mean something */
-  EVENTS: 600,
-  SLOW: 60,
-  ERRORS: 40,
-  FLUSH_MS: 2000,
-  FLUSH_LINES: 128,
-  MAX_BYTES: 4 * 1024 * 1024,
-  KEEP_FILES: 8,
-  DIR: '.aethergraph/diagnostics',
-  HOVER_DWELL_MS: 400,  /* below this it is the cursor crossing the graph, not attention */
-};
-const CONSOLE_LEVELS = { off: 'Console · silent', warn: 'Console · warnings', info: 'Console · info', debug: 'Console · everything' };
-const LEVEL_RANK = { off: 0, warn: 1, info: 2, debug: 3 };
-
-/* Fixed-capacity history. A growing array would make the telemetry the memory leak. */
-class Ring {
-  constructor(n) { this.cap = n; this.buf = new Array(n); this.i = 0; this.len = 0; }
-  push(v) { this.buf[this.i] = v; this.i = (this.i + 1) % this.cap; if (this.len < this.cap) this.len++; return v; }
-  toArray() {
-    const out = [];
-    for (let k = 0; k < this.len; k++) out.push(this.buf[(this.i - this.len + k + this.cap) % this.cap]);
-    return out;
-  }
-  last(n) { const a = this.toArray(); return a.slice(Math.max(0, a.length - n)); }
-  clear() { this.i = 0; this.len = 0; this.buf = new Array(this.cap); }
-}
-
-/* One numeric channel. Push is two stores and an add — cheap enough to sit in the frame loop.
-   Percentiles sort a copy, and only when something is actually looking. */
-class Chan {
-  constructor(n) { this.cap = n; this.buf = new Float64Array(n); this.i = 0; this.len = 0; this.sum = 0; this.max = 0; this.n = 0; }
-  push(v) {
-    this.buf[this.i] = v; this.i = (this.i + 1) % this.cap;
-    if (this.len < this.cap) this.len++;
-    this.sum += v; this.n++;
-    if (v > this.max) this.max = v;
-  }
-  stats() {
-    if (!this.len) return { n: 0, mean: 0, p50: 0, p95: 0, p99: 0, max: 0, recentMean: 0 };
-    const a = Array.prototype.slice.call(this.buf, 0, this.len).sort((x, y) => x - y);
-    const q = (p) => a[Math.min(a.length - 1, Math.floor(a.length * p))];
-    let s = 0; for (let k = 0; k < a.length; k++) s += a[k];
-    return { n: this.n, mean: this.sum / this.n, recentMean: s / a.length,
-      p50: q(0.5), p95: q(0.95), p99: q(0.99), max: this.max };
-  }
-  clear() { this.i = 0; this.len = 0; this.sum = 0; this.max = 0; this.n = 0; }
-}
-
-/* FNV-1a over (salt + value), widened to 64 bits by running two independent offsets. Not a
-   cryptographic hash and not claimed to be — see the privacy note above. */
-function pseudonym(value, salt) {
-  /* NUL separator: it cannot occur in a path, so `a`+`bc` and `ab`+`c` cannot collide.
-     Written as an ESCAPE rather than a literal NUL byte. A raw one makes grep, ripgrep
-     and every other text tool treat this entire file as binary and refuse to search it,
-     which actively obstructs anyone reading the plugin later. */
-  const s = String(salt || '') + '\u0000' + String(value || '');
-  let h1 = 0x811c9dc5, h2 = 0x01000193;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    h1 ^= c; h1 = Math.imul(h1, 0x01000193) >>> 0;
-    h2 = (h2 + c) >>> 0; h2 = Math.imul(h2, 0x85ebca6b) >>> 0; h2 ^= h2 >>> 13;
-  }
-  return (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
-}
-function randomSalt() {
-  const a = new Uint8Array(16);
-  (window.crypto || window.msCrypto).getRandomValues(a);
-  return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
-}
-
-class Telemetry {
-  constructor(plugin) {
-    this.plugin = plugin;
-    this.app = plugin.app;
-    this.session = pseudonym(String(Date.now()) + Math.random(), 'session').slice(0, 10);
-    this.started = Date.now();
-    /* Keep the first-run salt ephemeral. It is persisted only after the user explicitly enables
-       diagnostics, so merely installing or loading the plugin creates no diagnostic state. */
-    this.salt = plugin.settings.telemetrySalt || randomSalt();
-    this.frame = {
-      total: new Chan(TEL.FRAMES), sim: new Chan(TEL.FRAMES), upload: new Chan(TEL.FRAMES),
-      draw: new Chan(TEL.FRAMES), overlay: new Chan(TEL.FRAMES), pick: new Chan(TEL.FRAMES),
-    };
-    this.events = new Ring(TEL.EVENTS);
-    this.slow = new Ring(TEL.SLOW);
-    this.errors = new Map();          /* keyed, so a repeating fault is one row with a count */
-    this.counters = Object.create(null);
-    this.env = {};
-    this.health = [];
-    this.pending = [];
-    this.filePath = null;
-    this.fileBytes = 0;
-    this.fileErr = null;
-    this.lastFlush = Date.now();
-    this.longFrames = 0;
-  }
-
-  get level() { return LEVEL_RANK[this.plugin.settings.telemetryConsole] || 0; }
-  get slowMs() { return this.plugin.settings.slowFrameMs || 24; }
-  get enabled() {
-    return !!(this.plugin.settings.telemetry || this.plugin.settings.telemetryFile);
-  }
-
-  count(k, n) {
-    if (!this.enabled) return;
-    this.counters[k] = (this.counters[k] || 0) + (n === undefined ? 1 : n);
-  }
-
-  /* Privacy-aware identity. This is the single choke point — nothing else in the plugin may
-     put a note into telemetry, so the policy cannot be bypassed by forgetting it somewhere. */
-  ref(d) {
-    if (!d || !this.enabled) return null;
-    const lane = typeof d.privacy === 'string' && d.privacy ? d.privacy : 'unknown';
-    const known = lane === 'agent-safe' || lane === 'private-local'
-      || lane === 'restricted-pointer' || lane === 'quarantined';
-    if (!known || d.withhold_from_telemetry === true) return { lane, ref: 'withheld:policy' };
-    const identity = d.path || d.id || d.title || '';
-    return { lane, ref: 'h:' + pseudonym(identity, this.salt) };
-  }
-
-  mark(kind, data) {
-    if (!this.enabled) return null;
-    const e = { t: Date.now() - this.started, kind };
-    if (data) e.d = data;
-    this.events.push(e);
-    this.count('event.' + kind.split('.')[0]);
-    if (this.level >= 3 || (this.level >= 2 && !/^frame|^hover/.test(kind))) {
-      console.debug('[aethergraph]', kind, data === undefined ? '' : data);
-    }
-    this.line({ v: 'e', ...e });
-    return e;
-  }
-
-  err(where, e) {
-    if (!this.enabled) {
-      if (this.level >= 1) console.error('[aethergraph] ' + where, e);
-      return null;
-    }
-    const msg = (e && e.message) ? e.message : String(e);
-    const key = where + '|' + msg;
-    const prev = this.errors.get(key);
-    if (prev) { prev.n++; prev.last = Date.now() - this.started; }
-    else {
-      this.errors.set(key, { where, msg, n: 1,
-        first: Date.now() - this.started, last: Date.now() - this.started,
-        stack: (e && e.stack) ? String(e.stack).split('\n').slice(0, 8).join('\n') : null });
-      if (this.errors.size > TEL.ERRORS) this.errors.delete(this.errors.keys().next().value);
-    }
-    this.count('error');
-    if (this.level >= 1) console.error('[aethergraph] ' + where, e);
-    this.line({ v: 'x', t: Date.now() - this.started, where, msg });
-    this.flush(true);            /* an error is exactly what you want on disk before a crash */
-  }
-
-  /* Called once per frame. Six array writes; no allocation unless the frame was slow. */
-  tick(p, ctx) {
-    if (!this.enabled) return;
-    this.frame.total.push(p.total);
-    this.frame.sim.push(p.sim);
-    this.frame.upload.push(p.upload);
-    this.frame.draw.push(p.draw);
-    this.frame.overlay.push(p.overlay);
-    this.frame.pick.push(p.pick);
-    this.count('frames');
-    if (p.total >= this.slowMs) {
-      this.longFrames++;
-      this.count('frames.long');
-      /* Keep WHY it was slow, not just that it was. A frame-time series with no phase
-         attribution tells you there is a problem and nothing about where. */
-      let worst = 'total', wv = 0;
-      for (const k of ['sim', 'upload', 'draw', 'overlay', 'pick']) if (p[k] > wv) { wv = p[k]; worst = k; }
-      this.slow.push({ t: Date.now() - this.started, ms: +p.total.toFixed(2), worst,
-        phase: { sim: +p.sim.toFixed(2), upload: +p.upload.toFixed(2), draw: +p.draw.toFixed(2),
-          overlay: +p.overlay.toFixed(2), pick: +p.pick.toFixed(2) },
-        ctx: ctx || null });
-    }
-  }
-
-  /* ---- file sink ------------------------------------------------------------------
-     Off by default. When on, lines are buffered and appended in batches: a per-event write
-     would fire Obsidian's file-change machinery hundreds of times a second, so the telemetry
-     would degrade the thing it exists to measure. */
-  line(obj) {
-    if (!this.plugin.settings.telemetryFile) return;
-    this.pending.push(JSON.stringify(obj));
-    if (this.pending.length >= TEL.FLUSH_LINES) this.flush();
-  }
-
-  async ensureFile() {
-    const ad = this.app.vault.adapter;
-    if (!(await ad.exists(TEL.DIR))) await ad.mkdir(TEL.DIR);
-    if (!this.filePath) {
-      const d = new Date();
-      const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0')
-        + String(d.getDate()).padStart(2, '0') + '-'
-        + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0')
-        + String(d.getSeconds()).padStart(2, '0');
-      this.filePath = `${TEL.DIR}/aethergraph-${stamp}-${this.session}.jsonl`;
-      this.fileBytes = 0;
-      const head = JSON.stringify({ v: 'h', schema: TEL.SCHEMA, session: this.session,
-        started: new Date(this.started).toISOString(), env: this.env,
-        privacy: 'known lanes salted-hash; missing, unknown and policy-marked notes withheld' }) + '\n';
-      await ad.write(this.filePath, head);
-      this.fileBytes = head.length;
-      await this.prune();
-    }
-  }
-
-  async prune() {
-    try {
-      const ad = this.app.vault.adapter;
-      const listing = await ad.list(TEL.DIR);
-      const mine = (listing.files || []).filter(f => /aethergraph-.*\.jsonl$/.test(f)).sort();
-      for (const f of mine.slice(0, Math.max(0, mine.length - TEL.KEEP_FILES))) await ad.remove(f);
-    } catch (e) { /* pruning is housekeeping; never let it break logging */ }
-  }
-
-  async flush(force) {
-    if (!this.plugin.settings.telemetryFile || !this.pending.length) return;
-    if (!force && Date.now() - this.lastFlush < TEL.FLUSH_MS && this.pending.length < TEL.FLUSH_LINES) return;
-    const batch = this.pending; this.pending = [];
-    this.lastFlush = Date.now();
-    try {
-      await this.ensureFile();
-      const text = batch.join('\n') + '\n';
-      await this.app.vault.adapter.append(this.filePath, text);
-      this.fileBytes += text.length;
-      this.fileErr = null;
-      if (this.fileBytes > TEL.MAX_BYTES) { this.filePath = null; }   /* rotate */
-    } catch (e) {
-      this.fileErr = (e && e.message) ? e.message : String(e);
-      if (this.level >= 1) console.warn('[aethergraph] telemetry file write failed —', this.fileErr);
-    }
-  }
-
-  snapshot() {
-    const f = {};
-    for (const k of Object.keys(this.frame)) f[k] = this.frame[k].stats();
-    const total = this.counters.frames || 0;
-    return {
-      schema: TEL.SCHEMA, session: this.session,
-      uptimeMs: Date.now() - this.started,
-      env: this.env, health: this.health,
-      frame: f,
-      fps: f.total.p50 > 0 ? 1000 / f.total.p50 : 0,
-      longFrames: this.longFrames,
-      longPct: total ? (100 * this.longFrames / total) : 0,
-      counters: Object.assign({}, this.counters),
-      slow: this.slow.last(12),
-      errors: Array.from(this.errors.values()),
-      events: this.events.last(24),
-      file: { on: !!this.plugin.settings.telemetryFile, path: this.filePath, bytes: this.fileBytes, error: this.fileErr },
-    };
-  }
-
-  report() {
-    const s = this.snapshot();
-    const ms = (v) => (v === undefined ? '—' : v.toFixed(2) + ' ms');
-    const L = [];
-    L.push('# Aethergraph local diagnostics');
-    L.push('');
-    L.push(`Session \`${s.session}\` · ${(s.uptimeMs / 1000).toFixed(0)} s · generated ${new Date().toISOString()}`);
-    L.push('');
-    L.push('> Known privacy lanes appear only as salted hashes; missing, unknown and policy-marked');
-    L.push('> notes are withheld entirely.');
-    L.push('');
-    L.push('## Environment');
-    L.push('');
-    L.push('| | |');
-    L.push('|---|---|');
-    for (const [k, v] of Object.entries(s.env)) L.push(`| ${k} | ${String(v)} |`);
-    L.push('');
-    if (s.health.length) {
-      L.push('## Health');
-      L.push('');
-      for (const h of s.health) L.push(`- **${h.level}** — ${h.msg}`);
-      L.push('');
-    }
-    L.push('## Frame budget');
-    L.push('');
-    L.push(`${s.fps.toFixed(0)} fps median · ${s.longFrames.toLocaleString()} long frames of `
-      + `${(s.counters.frames || 0).toLocaleString()} (${s.longPct.toFixed(1)}%)`);
-    L.push('');
-    L.push('| phase | p50 | p95 | p99 | max | mean |');
-    L.push('|---|---|---|---|---|---|');
-    for (const k of ['total', 'sim', 'upload', 'draw', 'overlay', 'pick']) {
-      const c = s.frame[k];
-      L.push(`| ${k} | ${ms(c.p50)} | ${ms(c.p95)} | ${ms(c.p99)} | ${ms(c.max)} | ${ms(c.mean)} |`);
-    }
-    L.push('');
-    L.push('## Counters');
-    L.push('');
-    L.push('| counter | value |');
-    L.push('|---|---|');
-    for (const k of Object.keys(s.counters).sort()) L.push(`| ${k} | ${s.counters[k].toLocaleString()} |`);
-    L.push('');
-    if (s.slow.length) {
-      L.push('## Slowest frames retained');
-      L.push('');
-      L.push('| at | total | dominant | sim | upload | draw | overlay | pick | context |');
-      L.push('|---|---|---|---|---|---|---|---|---|');
-      for (const r of s.slow.slice().sort((a, b) => b.ms - a.ms)) {
-        const p = r.phase;
-        L.push(`| ${(r.t / 1000).toFixed(1)} s | ${r.ms} ms | **${r.worst}** | ${p.sim} | ${p.upload} `
-          + `| ${p.draw} | ${p.overlay} | ${p.pick} | ${r.ctx ? Object.entries(r.ctx).map(([a, b]) => a + '=' + b).join(' ') : '—'} |`);
-      }
-      L.push('');
-    }
-    if (s.errors.length) {
-      L.push('## Errors');
-      L.push('');
-      for (const e of s.errors) {
-        L.push(`### ${e.where} — ${e.n}×`);
-        L.push('');
-        L.push('```');
-        L.push(e.msg);
-        if (e.stack) L.push(e.stack);
-        L.push('```');
-        L.push('');
-      }
-    } else {
-      L.push('## Errors');
-      L.push('');
-      L.push('None recorded this session.');
-      L.push('');
-    }
-    L.push('## Recent events');
-    L.push('');
-    L.push('```');
-    for (const e of s.events) L.push(`${(e.t / 1000).toFixed(1).padStart(7)}s  ${e.kind}  ${e.d ? JSON.stringify(e.d) : ''}`);
-    L.push('```');
-    L.push('');
-    L.push('---');
-    L.push('*There was no hurt nor harm in the making of this, to anyone, anything, or anybody.*');
-    return L.join('\n');
-  }
-
-  reset() {
-    for (const k of Object.keys(this.frame)) this.frame[k].clear();
-    this.events.clear(); this.slow.clear(); this.errors.clear();
-    this.counters = Object.create(null);
-    this.longFrames = 0;
-  }
-}
-
 
 const VIEW_TYPE = 'aethergraph-view';
 const PAYLOADS = ['.aethergraph/aethergraph.json'];
@@ -1479,6 +1097,9 @@ async function readEnhancedPayload(app) {
   const failures = [];
   for (const path of PAYLOADS) {
     let raw;
+    /* The enhanced graph is a fixed, hidden, non-Markdown control file. Obsidian does not
+       expose it as a TFile, so the read-only Adapter call is the narrowest available API;
+       user-entered paths never reach this boundary. */
     try { raw = await app.vault.adapter.read(path); }
     catch (e) { failures.push(`${path}: ${e && e.message ? e.message : 'not found'}`); continue; }
     try {
@@ -1725,6 +1346,256 @@ function scoredTermNames(value) {
 function nodeSubjects(d) { return scoredTermNames(d && d.synthesis && d.synthesis.subjects); }
 function nodeContexts(d) { return scoredTermNames(d && d.synthesis && d.synthesis.contexts); }
 
+function normalizedLabel(value) {
+  return String(value || '').normalize('NFKC').toLocaleLowerCase()
+    .replace(/^\d{1,3}[\s._-]+/, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function humanLabel(value) {
+  const text = String(value || '').normalize('NFKC').replace(/^\d{1,3}[\s._-]+/, '')
+    .replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return text ? text[0].toLocaleUpperCase() + text.slice(1) : '';
+}
+
+const GENERIC_LABELS = new Set([
+  'ai', 'archive', 'area', 'assistant', 'chat', 'collection', 'context', 'conversation',
+  'conversations', 'document', 'documents', 'index', 'moc', 'note', 'notes', 'project',
+  'research', 'session', 'sessions', 'surface', 'transcript', 'unknown',
+]);
+
+function nodeSemanticLabels(d) {
+  return [
+    ...nodeSubjects(d).map(label => ({ label, source: 'subject' })),
+    ...nodeTopics(d).map(label => ({ label, source: 'topic' })),
+    ...nodeDisplayTags(d).map(label => ({ label, source: 'tag' })),
+    ...termNames(d && d.facets).map(label => ({ label, source: 'facet' })),
+  ];
+}
+
+function buildLabelStats(nodes) {
+  const documentFrequency = new Map();
+  for (const value of nodes || []) {
+    const d = value && value.d ? value.d : value;
+    const seen = new Set();
+    for (const item of nodeSemanticLabels(d)) {
+      const key = normalizedLabel(item.label);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      documentFrequency.set(key, (documentFrequency.get(key) || 0) + 1);
+    }
+  }
+  return { total: Math.max(1, (nodes || []).length), documentFrequency };
+}
+
+function labelCandidateScore(label, count, clusterSize, source, stats) {
+  const key = normalizedLabel(label);
+  if (!key || GENERIC_LABELS.has(key) || key.length < 3) return -Infinity;
+  const df = stats.documentFrequency.get(key) || 1;
+  const frequency = df / stats.total;
+  if (frequency > 0.20) return -Infinity;
+  const coverage = count / Math.max(1, clusterSize);
+  const minimum = clusterSize <= 3 ? 1 / clusterSize : 0.28;
+  if (coverage < minimum) return -Infinity;
+  const prior = { subject: 1, topic: 0.90, tag: 0.78, facet: 0.72 }[source] || 0.5;
+  const idf = Math.log((stats.total + 1) / (df + 1)) + 0.35;
+  const words = key.split(' ').length;
+  const specificity = clamp(0.72 + Math.min(0.42, key.length / 54) + (words > 1 ? 0.12 : 0), 0.7, 1.25);
+  return coverage * idf * prior * specificity;
+}
+
+function chooseClusterLabel(cluster, stats, used) {
+  let best = null;
+  for (const source of ['subject', 'topic', 'tag', 'facet']) {
+    const values = cluster[source + 's'];
+    if (!values) continue;
+    for (const [label, count] of values) {
+      const key = normalizedLabel(label);
+      const repetitions = used.get(key) || 0;
+      if (repetitions) continue;
+      const score = labelCandidateScore(label, count, cluster.n, source, stats);
+      if (!Number.isFinite(score)) continue;
+      if (!best || score > best.score || (score === best.score && key.localeCompare(best.key) < 0)) {
+        best = { label: humanLabel(label), key, source, count, score };
+      }
+    }
+  }
+  if (best) used.set(best.key, (used.get(best.key) || 0) + 1);
+  return best;
+}
+
+function bestNodeSemanticLabel(d, stats) {
+  let best = null;
+  for (const item of nodeSemanticLabels(d)) {
+    const key = normalizedLabel(item.label);
+    const score = labelCandidateScore(item.label, 1, 1, item.source, stats);
+    if (!Number.isFinite(score)) continue;
+    if (!best || score > best.score || (score === best.score && key.localeCompare(best.key) < 0)) {
+      best = { label: humanLabel(item.label), key, source: item.source, score };
+    }
+  }
+  return best;
+}
+
+/* Pooling requires shared topical identity as well as screen proximity. Unlabelled or unrelated
+   notes deliberately receive unique keys so a 2D projection collision cannot call them related. */
+function semanticPoolIdentity(d, stats, screenCell, depthBand, unique) {
+  const semantic = bestNodeSemanticLabel(d, stats);
+  return { semantic, key: semantic
+    ? `${screenCell}|${depthBand}|${semantic.key}`
+    : `${screenCell}|${depthBand}|@${unique}` };
+}
+
+function titleCounts(nodes) {
+  const counts = new Map();
+  const groups = new Map();
+  for (const value of nodes || []) {
+    const d = value && value.d ? value.d : value;
+    const key = normalizedLabel(displayTitle(d));
+    counts.set(key, (counts.get(key) || 0) + 1);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(d);
+  }
+  counts.suffixByPath = new Map();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const rows = group.map(d => {
+      const path = String(d && d.path || '').replace(/\\/g, '/');
+      return { path, parts: path.replace(/\.md(?:#.*)?$/i, '').split('/').filter(Boolean) };
+    });
+    for (const row of rows) {
+      let suffix = row.parts.join('/');
+      for (let length = 1; length <= row.parts.length; length++) {
+        const candidate = row.parts.slice(-length).join('/');
+        if (rows.filter(other => other.parts.slice(-length).join('/') === candidate).length === 1) {
+          suffix = candidate; break;
+        }
+      }
+      counts.suffixByPath.set(row.path, suffix);
+    }
+  }
+  return counts;
+}
+
+function disambiguatedTitle(d, counts) {
+  const title = displayTitle(d);
+  if (!counts || (counts.get(normalizedLabel(title)) || 0) < 2) return title;
+  const path = String(d && d.path || '').replace(/\\/g, '/');
+  const uniqueSuffix = counts.suffixByPath && counts.suffixByPath.get(path);
+  if (uniqueSuffix) return `${title} — ${uniqueSuffix}`;
+  const parts = path.replace(/\.md(?:#.*)?$/i, '').split('/').filter(Boolean);
+  const basename = parts.pop() || '';
+  if (basename && normalizedLabel(basename) !== normalizedLabel(title)) return `${title} — ${basename}`;
+  const parent = parts.pop();
+  return parent ? `${title} — ${parent}/${basename || title}` : title;
+}
+
+function safeNoteTarget(value) {
+  const raw = String(value || '').normalize('NFKC').replace(/\\/g, '/').trim();
+  if (!raw || /^(?:[a-z]:|\/)/i.test(raw)) return null;
+  const at = raw.indexOf('#');
+  const path = (at < 0 ? raw : raw.slice(0, at)).replace(/^\.\//, '');
+  if (!path || path.split('/').includes('..') || !/\.md$/i.test(path)) return null;
+  const subpath = at < 0 ? '' : raw.slice(at);
+  return { path, subpath };
+}
+
+function semanticTokenSet(d) {
+  const values = nodeSemanticLabels(d).map(item => item.label);
+  const out = new Set();
+  for (const value of values) {
+    for (const token of normalizedLabel(value).split(' ')) {
+      if (token.length >= 3 && !GENERIC_LABELS.has(token)) out.add(token);
+    }
+  }
+  return out;
+}
+
+function semanticOverlap(a, b) {
+  const left = semanticTokenSet(a), right = semanticTokenSet(b);
+  if (!left.size || !right.size) return 0;
+  let shared = 0;
+  for (const term of left) if (right.has(term)) shared++;
+  return shared / Math.max(1, Math.min(left.size, right.size));
+}
+
+function edgeRelevance(edge, kind) {
+  const raw = Number(edge && edge[EDGE.RELEVANCE]);
+  return Number.isFinite(raw) ? clamp(raw, 0, 1)
+    : kind === 'explicit' ? 1 : clamp(Number(edge && edge[EDGE.WEIGHT]) || 0, 0, 1);
+}
+
+function isNavigationScaffold(edge, kind, reasonVocab) {
+  const reason = normalizedLabel(vocabLabel(reasonVocab, edge && edge[EDGE.REASON], ''));
+  return reason.includes('moc') || reason.includes('structural navigation') || reason.includes('index navigation');
+}
+
+/* Navigation hubs remain completely typed and browseable, but their per-child spokes are a
+   directory, not thousands of equally meaningful visual relationships. Primary relations are
+   never capped. Context and Archive scaffold edges get deterministic per-hub budgets. */
+function selectRenderableEdges(explicit, latent, nodes, reasonVocab, presentationVocab) {
+  const entries = [];
+  const add = (list, kind) => list.forEach((edge, index) => entries.push({ edge, kind, index,
+    presentation: edgePresentation(edge, kind, presentationVocab) }));
+  add(explicit || [], 'explicit'); add(latent || [], 'latent');
+  const scaffoldDegree = {
+    context: new Uint32Array((nodes || []).length),
+    archive: new Uint32Array((nodes || []).length),
+  };
+  for (const entry of entries) {
+    if (!isNavigationScaffold(entry.edge, entry.kind, reasonVocab) || entry.presentation === 'primary') continue;
+    scaffoldDegree[entry.presentation][entry.edge[EDGE.A]]++;
+    scaffoldDegree[entry.presentation][entry.edge[EDGE.B]]++;
+  }
+  const tokenCache = new Map();
+  const tokens = (index) => {
+    if (!tokenCache.has(index)) tokenCache.set(index, semanticTokenSet(nodes[index] && nodes[index].d));
+    return tokenCache.get(index);
+  };
+  const overlap = (a, b) => {
+    const left = tokens(a), right = tokens(b);
+    if (!left.size || !right.size) return 0;
+    let shared = 0; for (const term of left) if (right.has(term)) shared++;
+    return shared / Math.max(1, Math.min(left.size, right.size));
+  };
+  const importance = (index) => Number(nodes[index] && nodes[index].d && nodes[index].d.synthesis
+    && nodes[index].d.synthesis.importance && nodes[index].d.synthesis.importance.score)
+      || Number(nodes[index] && nodes[index].d && nodes[index].d.standing) || 0;
+  const tier = { primary: 3, context: 2, archive: 1 };
+  entries.sort((left, right) => {
+    const le = left.edge, re = right.edge;
+    const ls = tier[left.presentation] * 10 + edgeRelevance(le, left.kind) * 4
+      + overlap(le[EDGE.A], le[EDGE.B]) * 3 + (importance(le[EDGE.A]) + importance(le[EDGE.B])) * 0.5;
+    const rs = tier[right.presentation] * 10 + edgeRelevance(re, right.kind) * 4
+      + overlap(re[EDGE.A], re[EDGE.B]) * 3 + (importance(re[EDGE.A]) + importance(re[EDGE.B])) * 0.5;
+    return rs - ls || le[EDGE.A] - re[EDGE.A] || le[EDGE.B] - re[EDGE.B]
+      || (left.kind === right.kind ? left.index - right.index : left.kind === 'explicit' ? -1 : 1);
+  });
+  const used = {
+    context: new Uint16Array((nodes || []).length),
+    archive: new Uint16Array((nodes || []).length),
+  };
+  const kept = [];
+  for (const entry of entries) {
+    const scaffold = isNavigationScaffold(entry.edge, entry.kind, reasonVocab)
+      && entry.presentation !== 'primary';
+    if (scaffold) {
+      const cap = entry.presentation === 'context' ? 24 : 12;
+      const degree = scaffoldDegree[entry.presentation];
+      const counter = used[entry.presentation];
+      const hubs = [entry.edge[EDGE.A], entry.edge[EDGE.B]].filter(index => degree[index] > cap);
+      if (hubs.some(index => counter[index] >= cap)) continue;
+      for (const index of hubs) counter[index]++;
+    }
+    kept.push(entry);
+  }
+  kept.sort((a, b) => (a.kind === b.kind ? a.index - b.index : a.kind === 'explicit' ? -1 : 1));
+  return {
+    explicit: kept.filter(item => item.kind === 'explicit').map(item => item.edge),
+    latent: kept.filter(item => item.kind === 'latent').map(item => item.edge),
+    suppressed: entries.length - kept.length,
+  };
+}
+
 function recallTokens(value) {
   const normalized = String(value || '').normalize('NFKC').toLocaleLowerCase();
   const matches = normalized.match(/[\p{L}\p{N}]+/gu) || [];
@@ -1774,8 +1645,8 @@ function directRecallFit(d, tokens) {
 }
 
 /* Pure, local recall modulation. The query exists only for the duration of this call. Returned
-   state contains counts and scores, never the query or its tokens, so neither plugin state nor
-   diagnostics can accidentally retain what the user asked about. */
+   state contains counts and scores, never the query or its tokens, so saved plugin state cannot
+   retain what the user asked about. */
 function modulateRecall(payload, query, options) {
   const opts = options || {}, nodes = payload && Array.isArray(payload.nodes) ? payload.nodes : [];
   const tokens = recallTokens(query);
@@ -1906,8 +1777,7 @@ const DEFAULTS = {
   layout: 'strata', tierBy: 'standing', angleBy: 'facet', density: 'core', connectionMode: 'focused',
   showExplicit: true, showLatent: true, showGhosts: false,
   showSevered: false, showPrivate: false, showFlow: false, labels: true, orbit: false,
-  perf: false, telemetry: false,
-  telemetryFile: false, telemetryConsole: 'warn', slowFrameMs: 24, telemetrySalt: '',
+  perf: false,
 };
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -1919,19 +1789,16 @@ const lerp = (a, b, t) => a + (b - a) * t;
    had quietly diverged. Anything enum-valued is validated against its current table on load
    and reset if it no longer exists. */
 const ENUMS = { layout: LAYOUTS, tierBy: TIERS, angleBy: ANGLE_MODES, density: DENSITY,
-  connectionMode: CONNECTION_MODES, telemetryConsole: CONSOLE_LEVELS };
+  connectionMode: CONNECTION_MODES };
 function sanitize(s) {
   const out = Object.assign({}, DEFAULTS, s || {});
-  const dropped = [];
   /* Removed semantics must not survive the next save merely because an older data.json
      still carries their keys. The source file remains untouched until Obsidian saves. */
   if (Object.prototype.hasOwnProperty.call(out, 'showCross')) {
     delete out.showCross;
-    dropped.push('showCross');
   }
   for (const [key, table] of Object.entries(ENUMS)) {
     if (!Object.prototype.hasOwnProperty.call(table, out[key])) {
-      dropped.push(`${key}="${out[key]}"`);
       out[key] = DEFAULTS[key];
     }
   }
@@ -1939,14 +1806,8 @@ function sanitize(s) {
     if (typeof DEFAULTS[k] === 'boolean' && typeof out[k] !== 'boolean') out[k] = DEFAULTS[k];
   }
   /* a nonsense threshold would either silence the slow-frame log or record every frame */
-  if (!(typeof out.slowFrameMs === 'number') || !isFinite(out.slowFrameMs)
-      || out.slowFrameMs < 4 || out.slowFrameMs > 2000) {
-    if (out.slowFrameMs !== DEFAULTS.slowFrameMs) dropped.push(`slowFrameMs=${out.slowFrameMs}`);
-    out.slowFrameMs = DEFAULTS.slowFrameMs;
-  }
-  if (typeof out.telemetrySalt !== 'string') out.telemetrySalt = '';
-  if (dropped.length) {
-    console.info('Aethergraph: reset stale settings from an older version —', dropped.join(', '));
+  for (const retired of ['telemetry', 'telemetryFile', 'telemetryConsole', 'telemetrySalt', 'slowFrameMs']) {
+    if (Object.prototype.hasOwnProperty.call(out, retired)) delete out[retired];
   }
   return out;
 }
@@ -2114,11 +1975,16 @@ class AetherView extends ItemView {
     this.frameMs = 16; this.simMs = 0; this.simSkip = 0; this.simPhase = 0; this._dwell = 0;
     this.pickAt = null; this.lastPick = -2;
     this.cardShowAll = false;
+    this.health = [];
     this.reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   }
   getViewType() { return VIEW_TYPE; }
   getDisplayText() { return 'Aethergraph'; }
   getIcon() { return 'git-fork'; }
+  titleFor(value) {
+    const d = value && value.d ? value.d : value;
+    return disambiguatedTitle(d, this.titleCounts);
+  }
 
   async onOpen() {
     try { await this.build(); } catch (e) { this.fail('startup', e); }
@@ -2126,8 +1992,6 @@ class AetherView extends ItemView {
 
   async build() {
     this.dead = false;
-    this.tel = this.plugin.tel;
-    this.tel.mark('view.open');
     const root = this.contentEl;
     root.empty(); root.addClass('aethergraph-root');
     this.buildChrome(root);
@@ -2148,7 +2012,6 @@ class AetherView extends ItemView {
     await this.load();
     this.resize();
     this.registerEvent(this.app.workspace.on('resize', () => this.resize()));
-    this.buildPanel(root);
     this.loop();
   }
 
@@ -2157,31 +2020,21 @@ class AetherView extends ItemView {
      so recovering is the difference between a hiccup and "the graph broke". Listeners are
      bound ONCE here — putting them in initRenderer() would stack a new pair on every retry. */
   bindContextRecovery() {
-    this.glCanvas.addEventListener('webglcontextlost', (e) => {
+    this.registerDomEvent(this.glCanvas, 'webglcontextlost', (e) => {
       e.preventDefault();
       this.gl = null;
-      this.tel.count('gl.contextLost');
-      this.tel.mark('gl.context-lost');
       new Notice('Aethergraph: GPU context lost — attempting to restore.', 4000);
     });
-    this.glCanvas.addEventListener('webglcontextrestored', () => {
-      this.tel.mark('gl.context-restored');
-      this.tel.count('gl.contextRestored');
+    this.registerDomEvent(this.glCanvas, 'webglcontextrestored', () => {
       try {
         this.initRenderer();
         if (this.gl) { this.buildBuffers(); this.resize(); }
         new Notice('Aethergraph: GPU context restored.', 3000);
-      } catch (err) { this.tel.err('context restore', err); }
+      } catch (err) { this.fail('context restore', err); }
     });
   }
   async onClose() {
     if (this.raf) cancelAnimationFrame(this.raf);
-    if (this._panelTimer) clearInterval(this._panelTimer);
-    if (this.tel) {
-      this.tel.mark('view.close', { frames: this.tel.counters.frames || 0,
-        longPct: +(this.tel.snapshot().longPct).toFixed(1) });
-      await this.tel.flush(true);        /* never lose the tail of a session on close */
-    }
     if (this.gl) { try { this.gl.dispose(); } catch (e) { /* context already gone */ } }
   }
 
@@ -2189,32 +2042,12 @@ class AetherView extends ItemView {
      problem degrades the picture rather than removing it. */
   initRenderer() {
     this.gl = null;
-    const t0 = performance.now();
     try {
       this.gl = new GL.GLRenderer(this.glCanvas);
-      this.glCanvas.style.display = '';
-      /* Capture what we are actually running on. Nearly every rendering defect is conditional
-         on the driver, and "it is slow for me" is unanswerable without this. */
-      const g = this.gl.gl;
-      const dbg = g.getExtension('WEBGL_debug_renderer_info');
-      this.tel.env = Object.assign(this.tel.env, {
-        renderer: 'WebGL2',
-        gpu: dbg ? g.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER),
-        glVersion: g.getParameter(g.VERSION),
-        glsl: g.getParameter(g.SHADING_LANGUAGE_VERSION),
-        maxTexture: g.getParameter(g.MAX_TEXTURE_SIZE),
-        maxVaryings: g.getParameter(g.MAX_VARYING_VECTORS),
-        antialias: !!g.getContextAttributes().antialias,
-        /* Chromium zeroes timer queries for privacy; recording that it is unavailable stops a
-           future session concluding the GPU costs nothing. */
-        gpuTimerQuery: !!g.getExtension('EXT_disjoint_timer_query_webgl2'),
-        devicePixelRatio: window.devicePixelRatio || 1,
-        initMs: +(performance.now() - t0).toFixed(1),
-      });
-      this.tel.mark('renderer.init', { gpu: this.tel.env.gpu, ms: this.tel.env.initMs });
+      this.glCanvas.hidden = false;
     } catch (e) {
       this.gl = null;
-      this.glCanvas.style.display = 'none';
+      this.glCanvas.hidden = true;
       /* Say so, out loud. The previous version degraded silently, and when the renderer failed
          to load at all the view showed a blank canvas under a perfectly healthy toolbar and
          status line — which reads as "the data is wrong" rather than "the renderer is gone".
@@ -2222,145 +2055,15 @@ class AetherView extends ItemView {
       console.warn('Aethergraph: WebGL2 unavailable, using canvas 2D —', e && e.message, e);
       new Notice('Aethergraph: WebGL2 unavailable — using the slower canvas renderer.\n'
         + (e && e.message ? e.message : ''), 8000);
-      this.tel.env.renderer = 'canvas2d';
-      this.tel.err('renderer init', e);
-      this.tel.health.push({ level: 'degraded', msg: 'WebGL2 unavailable — canvas 2D fallback, ~25x slower' });
+      this.health.push({ level: 'degraded', msg: 'WebGL2 unavailable — canvas 2D fallback, ~25x slower' });
     }
   }
 
-  /* ---------------------------------------------------------------- telemetry panel */
-  buildPanel(root) {
-    this.panel = root.createDiv({ cls: 'ag-panel' });
-    this.syncPanel();
-  }
-
-  syncPanel() {
-    if (!this.panel) return;
-    const on = !!this.s.telemetry;
-    this.panel.style.display = on ? '' : 'none';
-    if (this._panelTimer) { clearInterval(this._panelTimer); this._panelTimer = null; }
-    /* 4 Hz. Percentiles sort a 900-element copy; doing that per frame would make the telemetry
-       a measurable share of the thing it measures. */
-    if (on) { this.renderPanel(); this._panelTimer = window.setInterval(() => this.renderPanel(), 250); }
-  }
-
-  renderPanel() {
-    if (!this.panel || !this.s.telemetry || !this.tel) return;
-    const s = this.tel.snapshot();
-    const p = this.panel;
-    p.empty();
-
-    const head = p.createDiv({ cls: 'ag-p-head' });
-    head.createSpan({ cls: 'ag-p-title', text: 'local diagnostics' });
-    head.createSpan({ cls: 'ag-p-dim', text: `${s.session} · ${(s.uptimeMs / 1000).toFixed(0)}s` });
-    const close = head.createEl('button', { cls: 'ag-p-x', text: '×' });
-    close.onclick = async () => {
-      this.s.telemetry = false;
-      await this.plugin.save(this.s);
-      if (!this.tel.enabled) this.tel.reset();
-      this.syncPanel(); this.rebuildToggles();
-    };
-
-    /* headline: the number you actually watch */
-    const hero = p.createDiv({ cls: 'ag-p-hero' });
-    const fps = s.fps;
-    hero.createSpan({ cls: 'ag-p-fps' + (fps >= 55 ? ' good' : fps >= 30 ? ' ok' : ' bad'),
-      text: fps.toFixed(0) });
-    hero.createSpan({ cls: 'ag-p-dim', text: 'fps · p50 ' + s.frame.total.p50.toFixed(1)
-      + ' / p95 ' + s.frame.total.p95.toFixed(1) + ' / p99 ' + s.frame.total.p99.toFixed(1) + ' ms' });
-
-    /* phase attribution — a stacked bar of where the frame actually went */
-    const budget = p.createDiv({ cls: 'ag-p-sec' });
-    budget.createDiv({ cls: 'ag-p-h', text: 'frame budget (p50)' });
-    const bar = budget.createDiv({ cls: 'ag-p-bar' });
-    const phases = [['sim', '#f0c27e'], ['upload', '#7fb6f5'], ['draw', '#7ef0c0'],
-      ['overlay', '#c79bf0'], ['pick', '#f2748c']];
-    const budgetMs = Math.max(16.67, s.frame.total.p50);
-    for (const [k, col] of phases) {
-      const v = s.frame[k].p50;
-      if (v <= 0.001) continue;
-      const seg = bar.createDiv({ cls: 'ag-p-seg' });
-      seg.style.width = (100 * v / budgetMs) + '%';
-      seg.style.background = col;
-      seg.setAttr('title', `${k}  ${v.toFixed(2)} ms`);
-    }
-    const legend = budget.createDiv({ cls: 'ag-p-legend' });
-    for (const [k, col] of phases) {
-      const row = legend.createSpan({ cls: 'ag-p-key' });
-      const dot = row.createSpan({ cls: 'ag-p-dot' }); dot.style.background = col;
-      row.createSpan({ text: `${k} ${s.frame[k].p50.toFixed(2)}` });
-    }
-    budget.createDiv({ cls: 'ag-p-dim',
-      text: `${s.longFrames.toLocaleString()} long frames (>${this.tel.slowMs} ms) of `
-        + `${(s.counters.frames || 0).toLocaleString()} — ${s.longPct.toFixed(1)}%` });
-
-    /* health first: a warning here explains most "it looks wrong" reports */
-    if (s.health.length) {
-      const h = p.createDiv({ cls: 'ag-p-sec' });
-      h.createDiv({ cls: 'ag-p-h', text: 'health' });
-      for (const item of s.health) {
-        if (item.level === 'ok') continue;
-        h.createDiv({ cls: 'ag-p-warn ag-p-' + item.level, text: item.msg });
-      }
-      if (!s.health.some(i => i.level !== 'ok')) h.createDiv({ cls: 'ag-p-dim', text: 'all checks pass' });
-    }
-
-    const env = p.createDiv({ cls: 'ag-p-sec' });
-    env.createDiv({ cls: 'ag-p-h', text: 'environment' });
-    const et = env.createDiv({ cls: 'ag-p-kv' });
-    for (const k of ['renderer', 'gpu', 'devicePixelRatio', 'gpuTimerQuery', 'payloadAgeDays', 'nodes', 'lanes']) {
-      if (s.env[k] === undefined) continue;
-      et.createSpan({ cls: 'ag-p-k', text: k });
-      et.createSpan({ cls: 'ag-p-v', text: String(s.env[k]) });
-    }
-
-    if (s.slow.length) {
-      const sl = p.createDiv({ cls: 'ag-p-sec' });
-      sl.createDiv({ cls: 'ag-p-h', text: 'slowest frames' });
-      for (const r of s.slow.slice().sort((a, b) => b.ms - a.ms).slice(0, 6)) {
-        sl.createDiv({ cls: 'ag-p-row',
-          text: `${r.ms.toFixed(1)} ms · ${r.worst} · ${r.ctx ? r.ctx.nodes + 'n/' + r.ctx.edges + 'e' : ''}` });
-      }
-    }
-
-    if (s.errors.length) {
-      const er = p.createDiv({ cls: 'ag-p-sec' });
-      er.createDiv({ cls: 'ag-p-h ag-p-err', text: `errors (${s.errors.length})` });
-      for (const e of s.errors) {
-        er.createDiv({ cls: 'ag-p-warn ag-p-fatal', text: `${e.n}× ${e.where}: ${e.msg}` });
-      }
-    }
-
-    const ct = p.createDiv({ cls: 'ag-p-sec' });
-    ct.createDiv({ cls: 'ag-p-h', text: 'counters' });
-    const cg = ct.createDiv({ cls: 'ag-p-kv' });
-    for (const k of Object.keys(s.counters).sort()) {
-      cg.createSpan({ cls: 'ag-p-k', text: k });
-      cg.createSpan({ cls: 'ag-p-v', text: s.counters[k].toLocaleString() });
-    }
-
-    const ev = p.createDiv({ cls: 'ag-p-sec' });
-    ev.createDiv({ cls: 'ag-p-h', text: 'recent events' });
-    for (const e of s.events.slice(-8).reverse()) {
-      ev.createDiv({ cls: 'ag-p-row',
-        text: `${(e.t / 1000).toFixed(1)}s  ${e.kind}${e.d ? '  ' + JSON.stringify(e.d).slice(0, 90) : ''}` });
-    }
-
-    const foot = p.createDiv({ cls: 'ag-p-foot' });
-    foot.createSpan({ cls: 'ag-p-dim', text: s.file.on
-      ? `logging → ${s.file.path || '(opening)'}${s.file.error ? ' — ' + s.file.error : ''}`
-      : 'file logging off · lanes honoured · policy-marked notes withheld' });
-    const rep = foot.createEl('button', { cls: 'ag-p-btn', text: 'report' });
-    rep.onclick = () => this.plugin.writeReport();
-    const rst = foot.createEl('button', { cls: 'ag-p-btn', text: 'reset' });
-    rst.onclick = () => { this.tel.reset(); this.tel.mark('telemetry.reset'); };
-  }
-
-  /* the toolbar pills are built once; the panel's own close button has to re-sync them */
+  /* Toolbar pills are built once and re-synced after state changes. */
   rebuildToggles() {
     const btns = this.contentEl.querySelectorAll('.ag-tog');
     const keys = ['showExplicit', 'showLatent', 'showGhosts', 'showSevered',
-      'showFlow', 'showPrivate', 'labels', 'orbit', 'perf', 'telemetry'];
+      'showFlow', 'showPrivate', 'labels', 'orbit', 'perf'];
     btns.forEach((b, i) => {
       if (!keys[i]) return;
       b.toggleClass('is-on', !!this.s[keys[i]]);
@@ -2374,7 +2077,6 @@ class AetherView extends ItemView {
     if (this.dead) return;
     this.dead = true;
     if (this.raf) cancelAnimationFrame(this.raf);
-    if (this.tel) this.tel.err(where, e);
     console.error('Aethergraph: stopped in ' + where, e);
     new Notice('Aethergraph stopped: ' + where + ' — ' + (e && e.message ? e.message : e)
       + '\nSee the developer console (Ctrl+Shift+I) for the stack.', 0);
@@ -2383,7 +2085,8 @@ class AetherView extends ItemView {
 
   buildChrome(root) {
     const bar = this.bar = root.createDiv({ cls: 'aethergraph-bar' });
-    const mk = (label, opts, cur, on) => {
+    this.controlSelects = {};
+    const mk = (key, label, opts, cur, on) => {
       const w = bar.createDiv({ cls: 'ag-ctl' });
       w.createSpan({ cls: 'ag-lbl', text: label });
       const sel = w.createEl('select');
@@ -2394,21 +2097,20 @@ class AetherView extends ItemView {
       }
       sel.onchange = () => {
         on(sel.value);
-        this.tel.mark('control.' + label.toLowerCase(), { value: sel.value });
         this.plugin.save(this.s); this.relayout();
       };
+      this.controlSelects[key] = sel;
     };
-    mk('Space', Object.entries(LAYOUTS), this.s.layout, v => (this.s.layout = v));
-    mk('Tier', Object.entries(TIERS), this.s.tierBy, v => (this.s.tierBy = v));
-    mk('Angle', Object.entries(ANGLE_MODES), this.s.angleBy, v => (this.s.angleBy = v));
-    mk('Density', Object.entries(DENSITY).map(([k, v]) => [k, v.label]), this.s.density, v => (this.s.density = v));
-    mk('Connections', Object.entries(CONNECTION_MODES), this.s.connectionMode, v => (this.s.connectionMode = v));
+    mk('layout', 'Space', Object.entries(LAYOUTS), this.s.layout, v => (this.s.layout = v));
+    mk('tierBy', 'Tier', Object.entries(TIERS), this.s.tierBy, v => (this.s.tierBy = v));
+    mk('angleBy', 'Angle', Object.entries(ANGLE_MODES), this.s.angleBy, v => (this.s.angleBy = v));
+    mk('density', 'Density', Object.entries(DENSITY).map(([k, v]) => [k, v.label]), this.s.density, v => (this.s.density = v));
+    mk('connectionMode', 'Connections', Object.entries(CONNECTION_MODES), this.s.connectionMode, v => (this.s.connectionMode = v));
 
     const tw = bar.createDiv({ cls: 'ag-ctl ag-toggles' });
-    const toggles = [['showExplicit', 'direct'], ['showLatent', 'latent'],
+    const toggles = [['showExplicit', 'declared'], ['showLatent', 'derived'],
       ['showGhosts', 'ghosts'], ['showSevered', 'severed'], ['showFlow', 'flow'],
-      ['showPrivate', 'private'], ['labels', 'labels'], ['orbit', 'orbit'], ['perf', 'perf'],
-      ['telemetry', 'diagnostics']];
+      ['showPrivate', 'private'], ['labels', 'labels'], ['orbit', 'orbit'], ['perf', 'perf']];
     for (const [key, name] of toggles) {
       const b = tw.createEl('button', { text: name, cls: 'ag-tog' });
       b.setAttr('type', 'button');
@@ -2420,14 +2122,8 @@ class AetherView extends ItemView {
       sync();
       b.onclick = async () => {
         this.s[key] = !this.s[key]; sync();
-        if (key === 'telemetry' && this.s[key]) await this.plugin.ensureDiagnosticSalt();
         await this.plugin.save(this.s);
-        this.tel.mark('toggle', { key, on: !!this.s[key] });
         if (key === 'showPrivate' || key === 'showExplicit' || key === 'showLatent') this.relayout();
-        else if (key === 'telemetry') {
-          if (!this.tel.enabled) this.tel.reset();
-          this.syncPanel();
-        }
         else this.updateInfo();
       };
     }
@@ -2437,9 +2133,6 @@ class AetherView extends ItemView {
     inp.oninput = () => {
       this.query = inp.value.toLowerCase();
       this.relayout();
-      /* length and hit count only — the query itself is something you typed and may name
-         private material, so it is not the sort of thing a log should hold */
-      this.tel.mark('filter', { len: this.query.length, hits: this.nodes ? this.nodes.length : 0 });
     };
 
     this.info = root.createDiv({ cls: 'aethergraph-info' });
@@ -2447,23 +2140,28 @@ class AetherView extends ItemView {
     this.info.setAttr('aria-live', 'polite');
     this.tip = root.createDiv({ cls: 'aethergraph-tip' });
     this.tip.setAttr('role', 'tooltip');
-    this.tip.style.display = 'none';
+    this.tip.hidden = true;
+  }
+
+  resetToDefaults() {
+    this.s = Object.assign({}, DEFAULTS);
+    this.cam = { yaw: 0.6, pitch: 0.42, dist: 1250, ox: 0, oy: 0 };
+    this.query = '';
+    if (this.filterInput) this.filterInput.value = '';
+    for (const [key, select] of Object.entries(this.controlSelects || {})) select.value = this.s[key];
+    this.clearSelection();
+    this.rebuildToggles();
+    this.relayout();
   }
 
   async load() {
-    const t0 = performance.now();
     const enhanced = await readEnhancedPayload(this.app);
     this.localBaseline = !enhanced.data;
     this.data = enhanced.data || buildBaselinePayload(this.app);
     this.payloadSource = enhanced.path || 'metadata-cache baseline';
-    const bytes = enhanced.raw ? enhanced.raw.length : 0;
-    this.tel.mark(enhanced.data ? 'payload.load' : 'payload.baseline', {
-      bytes, nodes: this.data.nodes.length, ms: +(performance.now() - t0).toFixed(1),
-    });
-    this.checkHealth(bytes);
-    this.tel.env.payloadSource = this.payloadSource;
+    this.checkHealth();
     if (this.localBaseline) {
-      this.tel.health.push({ level: 'warn', msg: 'using the local authored-link baseline; no enhanced payload loaded' });
+      this.health.push({ level: 'warn', msg: 'using the local authored-link baseline; no enhanced payload loaded' });
       const why = enhanced.failures.length ? ` (${enhanced.failures[0]})` : '';
       new Notice(`Aethergraph: using authored note links${why}`, 6000);
     }
@@ -2473,13 +2171,10 @@ class AetherView extends ItemView {
   /* The picture is only as good as the data behind it, and a stale or half-built payload looks
      exactly like a working one. Ask the questions up front and record the answers, so "it looks
      wrong" has somewhere to start. */
-  checkHealth(bytes) {
+  checkHealth() {
     const d = this.data;
-    /* Health is a statement about the CURRENT payload, not a log. It used to append to a
-       plugin-lifetime array, so every reopen duplicated the whole list — the first telemetry
-       dump came back with four findings listed twice. */
-    const h = this.tel.health = [];
-    const add = (level, msg) => { h.push({ level, msg }); if (level !== 'ok') this.tel.mark('health.' + level, { msg }); };
+    const h = this.health = [];
+    const add = (level, msg) => h.push({ level, msg });
 
     if (d.schema !== 'aethergraph.v2' && d.schema !== 'aethergraph.v3' && d.schema !== 'aethergraph.v4') {
       add('warn', `payload schema is "${d.schema}", this build expects v2, v3 or v4 — `
@@ -2488,8 +2183,6 @@ class AetherView extends ItemView {
 
     if (d.observed_at) {
       const ageDays = (Date.now() - Date.parse(d.observed_at)) / 86400000;
-      this.tel.env.payloadObserved = d.observed_at;
-      this.tel.env.payloadAgeDays = +ageDays.toFixed(1);
       if (ageDays > 14) add('warn', `payload is ${ageDays.toFixed(0)} days old — rebuild or replace the enhanced payload`);
       else add('ok', `payload ${ageDays.toFixed(1)} days old`);
     } else add('warn', 'payload has no observed_at — cannot tell how stale it is');
@@ -2513,27 +2206,17 @@ class AetherView extends ItemView {
       if (regions.counts.degraded || regions.counts.inactive) {
         add('degraded', `memory synthesis regions — ${regions.label}`);
       } else add('ok', `memory synthesis regions — ${regions.label}`);
-      this.tel.env.synthesisMode = d.synthesis.mode;
-      this.tel.env.synthesisRegions = regions.label;
     }
     const coreN = d.nodes.filter(DENSITY.core.test).length;
     const corpusN = d.nodes.filter(DENSITY.corpus.test).length;
     if (coreN === corpusN) add('warn', 'Core and Corpus currently contain the same notes — transcript/dial material may be absent');
 
-    const lanes = {};
-    for (const n of d.nodes) lanes[n.privacy || 'agent-safe'] = (lanes[n.privacy || 'agent-safe'] || 0) + 1;
     /* `family` is what drives node SHAPE and tier-by-family, not `role`. The first version of
        this check tested `role` and reported "every note has no role — shape is a
        guess", which was alarming and wrong: role is empty for every node, but family is
        populated for every node. A health check that cries wolf is worse than none. */
     const unlabelled = d.nodes.filter(n => !n.family).length;
     const roleless = d.nodes.filter(n => !n.role).length;
-    Object.assign(this.tel.env, {
-      payloadBytes: bytes, nodes: d.nodes.length,
-      explicit: (d.explicit || []).length, latent: (d.latent || []).length,
-      ghosts: (d.ghosts || []).length, severed: (d.severed || []).length,
-      lanes: JSON.stringify(lanes),
-    });
     if (unlabelled) {
       add('warn', `${unlabelled.toLocaleString()} of ${d.nodes.length.toLocaleString()} notes have no role `
         + 'family — shape and tier-by-family are guesses for those');
@@ -2566,7 +2249,6 @@ class AetherView extends ItemView {
 
   relayout() {
     if (!this.data) return;
-    const t0 = performance.now();
     const test = DENSITY[this.s.density].test, q = this.query;
     const keep = [];
     const eligible = this.data.nodes.map(n => test(n)
@@ -2600,8 +2282,22 @@ class AetherView extends ItemView {
     this.reasonVocab = this.data.reason_vocab || [];
     this.explicitAll = remap(this.data.explicit || []);
     this.latentAll = remap(this.data.latent || []);
-    this.explicit = this.explicitAll.filter(e => edgeVisible(e, 'explicit', this.s, this.presentationVocab));
-    this.latent = this.latentAll.filter(e => edgeVisible(e, 'latent', this.s, this.presentationVocab));
+    this.titleCounts = titleCounts(keep);
+    this.labelStats = buildLabelStats(keep);
+    for (const n of keep) {
+      n.labelTerms = {
+        subjects: nodeSubjects(n.d), topics: nodeTopics(n.d),
+        tags: nodeDisplayTags(n.d), facets: termNames(n.d.facets),
+      };
+      n.poolSemantic = bestNodeSemanticLabel(n.d, this.labelStats);
+    }
+    const tierExplicit = this.explicitAll.filter(e => edgeVisible(e, 'explicit', this.s, this.presentationVocab));
+    const tierLatent = this.latentAll.filter(e => edgeVisible(e, 'latent', this.s, this.presentationVocab));
+    const visual = selectRenderableEdges(tierExplicit, tierLatent, keep, this.reasonVocab, this.presentationVocab);
+    this.explicit = visual.explicit;
+    this.latent = visual.latent;
+    this.suppressedEdgeCount = visual.suppressed;
+    this.tierEdgeCount = tierExplicit.length + tierLatent.length;
     for (const e of this.explicit) { keep[e[0]].deg++; keep[e[1]].deg++; }
     for (const e of this.latent) { keep[e[0]].deg++; keep[e[1]].deg++; }
     this.visibleEdgeCount = this.explicit.length + this.latent.length;
@@ -2621,27 +2317,11 @@ class AetherView extends ItemView {
     this.pinned = null;
     this.cardShowAll = false;
     if (this.card) { this.card.remove(); this.card = null; }
-    const tp = performance.now();
     this.place();
-    const placeMs = performance.now() - tp;
     this.sim = new Sim3(this.nodes, this.explicit.concat(this.latent), this.s.layout === 'force');
     this.simSkip = 0; this.simPhase = 0; this._dwell = 0;
-    const tb = performance.now();
     this.buildBuffers();
-    const bufMs = performance.now() - tb;
     this.updateInfo();
-    this.tel.count('relayout');
-    this.tel.mark('relayout', {
-      ms: +(performance.now() - t0).toFixed(1),
-      place: +placeMs.toFixed(1), buffers: +bufMs.toFixed(1),
-      nodes: this.nodes.length, edgesShown: this.visibleEdgeCount, edgesAll: this.allEdgeCount,
-      explicitShown: this.explicit.length, latentShown: this.latent.length,
-      facetGapDistinct: this.facetGapDistinct, facetGapUnknown: this.facetGapUnknown,
-      ghosts: this.ghosts.length, mode: this.s.connectionMode,
-      density: this.s.density, space: this.s.layout, tier: this.s.tierBy, angle: this.s.angleBy,
-      filtered: this.query ? 1 : 0, recallTokens: this.recallFrame ? this.recallFrame.tokenCount : 0,
-      recallBudget: this.recallFrame ? this.recallFrame.budget : 0,
-    });
   }
 
   /* Everything static about a node or edge is packed once, here, into typed arrays the GPU
@@ -2677,8 +2357,8 @@ class AetherView extends ItemView {
       /* base alpha folds in the age fade, so opacity stays a real channel with zero cost */
       const recallAlpha = N[i].recall && recallPeak > 0
         ? 0.35 + 0.65 * clamp(N[i].recall.activation / recallPeak, 0, 1) : 1;
-      a.style[i * 4 + 3] = clamp(0.30 + (d.standing || 0) * 0.9, 0.22, 0.95)
-                         * (1 - (d.age === undefined ? 0.4 : d.age) * 0.5) * recallAlpha;
+      a.style[i * 4 + 3] = clamp(0.42 + (d.standing || 0) * 0.58, 0.36, 0.96)
+                         * (1 - (d.age === undefined ? 0.4 : d.age) * 0.24) * recallAlpha;
       a.flags[i * 4 + 0] = d.authority_rank === undefined ? 2 : d.authority_rank;
       a.flags[i * 4 + 1] = PRIVACY_CODE[d.privacy] === undefined ? 0 : PRIVACY_CODE[d.privacy];
       a.flags[i * 4 + 2] = d.contested ? 1 : 0;
@@ -2773,9 +2453,14 @@ class AetherView extends ItemView {
 
   updateInfo() {
     if (!this.info || !this.nodes) return;
-    let s = `${this.nodes.length.toLocaleString()} notes · ${this.visibleEdgeCount.toLocaleString()} of `
-      + `${this.allEdgeCount.toLocaleString()} connections shown · ${this.explicit.length.toLocaleString()} direct · `
-      + `${this.latent.length.toLocaleString()} contextual · ${this.ghosts.length} ghosts`;
+    const tiers = { primary: 0, context: 0, archive: 0 };
+    for (const edge of this.explicit) tiers[edgePresentation(edge, 'explicit', this.presentationVocab)]++;
+    for (const edge of this.latent) tiers[edgePresentation(edge, 'latent', this.presentationVocab)]++;
+    const ghostsVisible = this.s.showGhosts ? this.ghosts.length : 0;
+    let s = `${this.nodes.length.toLocaleString()} notes · ${this.visibleEdgeCount.toLocaleString()} visualized of `
+      + `${this.allEdgeCount.toLocaleString()} typed · ${tiers.primary.toLocaleString()} primary · `
+      + `${tiers.context.toLocaleString()} context · ${tiers.archive.toLocaleString()} archive · `
+      + `${ghostsVisible}/${this.ghosts.length} ghosts visible`;
     if (this.recallFrame && this.recallFrame.active) {
       s += ` · recall working set ${this.recallFrame.workingSet.length}/${this.recallFrame.budget}`;
       if (this.regionRecall && this.regionRecall.active) {
@@ -2784,10 +2469,12 @@ class AetherView extends ItemView {
     }
     if (this.s.perf) {
       const fps = this.frameMs > 0 ? (1000 / this.frameMs) : 0;
-      const drawCalls = this.gl ? 2 : (this.nodes.length + this.explicit.length + this.latent.length);
+      const graphDraws = this.gl ? 2 : (this.nodes.length + this.explicit.length + this.latent.length);
       s += `   ▏ ${this.gl ? 'WebGL2' : 'canvas2d'} · ${fps.toFixed(0)} fps · ${this.frameMs.toFixed(1)} ms`
          + ` · sim ${this.simMs.toFixed(1)} ms${this.simSkip ? '/' + (this.simSkip + 1) : ''}`
-         + ` · ${drawCalls.toLocaleString()} draw calls`;
+         + ` · overlay ${((this._phase && this._phase.overlay) || 0).toFixed(1)} ms`
+         + ` · ${graphDraws.toLocaleString()} ${this.gl ? 'GPU batches' : 'graph primitives'}`
+         + ` · ${(this.poolDrawCount || 0).toLocaleString()} semantic pools`;
     }
     this.info.setText(s);
   }
@@ -2807,11 +2494,11 @@ class AetherView extends ItemView {
   bindEvents() {
     const c = this.stack;
     let drag = null;
-    c.addEventListener('wheel', e => {
+    this.registerDomEvent(c, 'wheel', e => {
       e.preventDefault();
       this.cam.dist = clamp(this.cam.dist * (e.deltaY > 0 ? 1.12 : 1 / 1.12), 220, 9000);
     }, { passive: false });
-    c.addEventListener('mousedown', e => {
+    this.registerDomEvent(c, 'mousedown', e => {
       drag = { x: e.clientX, y: e.clientY, yaw: this.cam.yaw, pitch: this.cam.pitch,
         ox: this.cam.ox, oy: this.cam.oy, pan: e.shiftKey || e.button === 1, moved: false };
     });
@@ -2821,11 +2508,11 @@ class AetherView extends ItemView {
        cursor, so selection fired at random. Remember whether the gesture moved, and let the
        click read that. */
     this._dragMoved = false;
-    window.addEventListener('mouseup', () => {
+    this.registerDomEvent(window, 'mouseup', () => {
       this._dragMoved = !!(drag && drag.moved);
       drag = null;
     });
-    c.addEventListener('mousemove', e => {
+    this.registerDomEvent(c, 'mousemove', e => {
       const r = c.getBoundingClientRect();
       this.mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
       this.pickAt = this.mouse;       /* pick only when the cursor actually moves */
@@ -2835,27 +2522,36 @@ class AetherView extends ItemView {
       if (drag.pan) { this.cam.ox = drag.ox + dx; this.cam.oy = drag.oy + dy; }
       else { this.cam.yaw = drag.yaw + dx * 0.006; this.cam.pitch = clamp(drag.pitch + dy * 0.006, -1.45, 1.45); }
     });
-    c.addEventListener('mouseleave', () => { this.mouse = null; this.hover = null; this.pickAt = null; });
-    c.addEventListener('click', e => {
-      if (this._dragMoved) { this._dragMoved = false; this.tel.count('camera.drag'); return; }
+    this.registerDomEvent(c, 'mouseleave', () => { this.mouse = null; this.hover = null; this.pickAt = null; });
+    this.registerDomEvent(c, 'click', e => {
+      if (this._dragMoved) { this._dragMoved = false; return; }
+      if (e.detail > 1) return;
       if (!this.hover) { this.clearSelection(); return; }
       if (e.ctrlKey || e.metaKey) { this.openNote(this.hover, false); return; }
       this.select(this.hover);
     });
+    this.registerDomEvent(c, 'dblclick', e => {
+      e.preventDefault();
+      if (this.hover) this.openNote(this.hover, false);
+    });
     /* Right-click is where the actions live. Obsidian's own Menu is used rather than a bespoke
        one so it looks and behaves like the rest of the app — keyboard nav, theming, dismissal. */
-    c.addEventListener('contextmenu', e => {
+    this.registerDomEvent(c, 'contextmenu', e => {
       e.preventDefault();
       const n = this.hover;
       const menu = new Menu();
       if (n) this.nodeMenu(menu, n); else this.viewMenu(menu);
       menu.showAtMouseEvent(e);
-      this.tel.mark('menu.open', n ? this.tel.ref(n.d) : { target: 'background' });
-      this.tel.count('menu.open');
     });
-    /* Escape lets go of everything without hunting for empty space to click. */
+    /* Keyboard actions mirror the pointer's select/open distinction. */
     this.scope = this.app.scope;
-    c.addEventListener('keydown', e => { if (e.key === 'Escape') this.clearSelection(); });
+    this.registerDomEvent(c, 'keydown', e => {
+      const active = this.hover || this.pinned || this.focus;
+      if (e.key === 'Escape') { this.clearSelection(); return; }
+      if (!active) return;
+      if (e.key === 'Enter') { e.preventDefault(); this.openNote(active, e.shiftKey); }
+      else if (e.key === ' ') { e.preventDefault(); this.select(active); }
+    });
   }
 
   /* ---------------------------------------------------------------- selection */
@@ -2867,20 +2563,31 @@ class AetherView extends ItemView {
     this.cardShowAll = false;
     this._near = this.neighbourhood(n);
     this.showCard(n);
-    this.tel.mark('select', Object.assign({ neighbours: this._near.size - 1 }, this.tel.ref(n.d)));
-    this.tel.count('select');
   }
   clearSelection() {
-    if (this.pinned || this.focus) this.tel.mark('select.clear');
     this.pinned = null; this.focus = null; this._near = null;
     if (this.card) { this.card.remove(); this.card = null; }
   }
-  openNote(n, split) {
-    this.tel.mark('note.open', Object.assign({ split: !!split }, this.tel.ref(n.d)));
-    this.tel.count('note.open');
-    if (split) this.app.workspace.getLeaf('split').openFile(
-      this.app.vault.getAbstractFileByPath(n.d.path));
-    else this.app.workspace.openLinkText(n.d.path, '', false);
+  async openNote(n, split) {
+    const target = safeNoteTarget(n && n.d && n.d.path);
+    if (!target) {
+      new Notice('Aethergraph: this item has no safe Markdown target.', 5000);
+      return false;
+    }
+    const file = this.app.vault.getAbstractFileByPath(target.path);
+    if (!file || (TFile && !(file instanceof TFile)) || file.extension !== 'md') {
+      new Notice(`Aethergraph: note not found in this vault: ${target.path}`, 6000);
+      return false;
+    }
+    try {
+      const leaf = this.app.workspace.getLeaf(split ? 'split' : false);
+      const state = target.subpath ? { eState: { subpath: target.subpath }, active: true } : { active: true };
+      await leaf.openFile(file, state);
+      return true;
+    } catch (error) {
+      new Notice(`Aethergraph: could not open ${target.path}: ${error.message}`, 7000);
+      return false;
+    }
   }
 
   /* Counts are disjoint by kind. Facet state is a descriptor on those relations, never a third
@@ -2888,16 +2595,22 @@ class AetherView extends ItemView {
   relations(n) {
     const i = this.nodes.indexOf(n);
     const count = (explicit, latent) => {
-      let direct = 0, contextual = 0, distinct = 0, unknown = 0;
+      let declared = 0, inferred = 0, primary = 0, context = 0, archive = 0;
+      let distinct = 0, unknown = 0;
       const scan = (list, kind) => {
         for (const e of list) if (e[EDGE.A] === i || e[EDGE.B] === i) {
-          if (kind === 'explicit') direct++; else contextual++;
+          if (kind === 'explicit') declared++; else inferred++;
+          const presentation = edgePresentation(e, kind, this.presentationVocab);
+          if (presentation === 'primary') primary++;
+          else if (presentation === 'context') context++;
+          else archive++;
           if (e[EDGE.FACET_GAP] === 1) distinct++;
           else if (e[EDGE.FACET_GAP] === -1) unknown++;
         }
       };
       scan(explicit, 'explicit'); scan(latent, 'latent');
-      return { direct, contextual, distinct, unknown, total: direct + contextual };
+      return { declared, inferred, primary, context, archive, distinct, unknown,
+        total: declared + inferred };
     };
     return {
       visible: count(this.explicit, this.latent),
@@ -2927,15 +2640,18 @@ class AetherView extends ItemView {
         const raw = Number(edge[EDGE.RELEVANCE]);
         const relevance = Number.isFinite(raw) ? clamp(raw, 0, 1)
           : kind === 'explicit' ? 1 : clamp(Number(edge[EDGE.WEIGHT]) || 0, 0, 1);
-        out.push({ edge, kind, node, relevance, reason: this.edgeReason(edge, kind),
+        out.push({ edge, kind, node, relevance,
+          presentation: edgePresentation(edge, kind, this.presentationVocab),
+          reason: this.edgeReason(edge, kind),
           facetState: this.facetStateLabel(edge) });
       }
     };
     add(includeAll ? (this.explicitAll || this.explicit) : this.explicit, 'explicit');
     add(includeAll ? (this.latentAll || this.latent) : this.latent, 'latent');
-    out.sort((a, b) => b.relevance - a.relevance
+    const tier = { primary: 3, context: 2, archive: 1 };
+    out.sort((a, b) => tier[b.presentation] - tier[a.presentation] || b.relevance - a.relevance
       || (a.kind === b.kind ? 0 : a.kind === 'explicit' ? -1 : 1)
-      || displayTitle(a.node.d).localeCompare(displayTitle(b.node.d)));
+      || this.titleFor(a.node).localeCompare(this.titleFor(b.node)));
     return out;
   }
 
@@ -2954,38 +2670,26 @@ class AetherView extends ItemView {
     if (d.project) item(`Filter to “${d.project}”`, 'folder', () => this.applyFilter(d.project));
     menu.addSeparator();
     item('Copy wikilink', 'link', async () => {
-      await navigator.clipboard.writeText(`[[${d.path.replace(/\.md$/, '')}|${displayTitle(d)}]]`);
+      await navigator.clipboard.writeText(`[[${d.path.replace(/\.md$/, '')}|${this.titleFor(n)}]]`);
       new Notice('Copied wikilink');
-      this.tel.mark('copy.wikilink', this.tel.ref(d));
     });
     item('Copy path', 'clipboard-copy', async () => {
       await navigator.clipboard.writeText(d.path);
       new Notice('Copied path');
-      this.tel.mark('copy.path', this.tel.ref(d));
     });
     const r = this.relations(n);
     menu.addSeparator();
-    menu.addItem(mi => { mi.setTitle(`${r.visible.total} of ${r.all.total} connections shown · `
-        + `${r.visible.direct} direct · ${r.visible.contextual} contextual`);
+    menu.addItem(mi => { mi.setTitle(`${r.visible.total} of ${r.all.total} connections visualized · `
+        + `${r.visible.primary} primary · ${r.visible.context} context · ${r.visible.archive} archive`);
       mi.setIcon('git-fork'); mi.setDisabled(true); });
   }
 
   viewMenu(menu) {
     const item = (title, icon, fn) => menu.addItem(mi => { mi.setTitle(title); mi.setIcon(icon); mi.onClick(fn); });
     item('Clear focus and filter', 'x', () => { this.applyFilter(''); this.clearSelection(); });
-    item(this.s.telemetry ? 'Hide diagnostics panel' : 'Show diagnostics panel', 'activity', async () => {
-      this.s.telemetry = !this.s.telemetry;
-      if (this.s.telemetry) await this.plugin.ensureDiagnosticSalt();
-      await this.plugin.save(this.s);
-      if (!this.tel.enabled) this.tel.reset();
-      this.syncPanel(); this.rebuildToggles();
-    });
-    menu.addSeparator();
-    item('Run diagnostics', 'stethoscope', () => this.plugin.diagnose());
-    item('Write diagnostics report', 'file-output', () => this.plugin.writeReport());
     menu.addSeparator();
     item('Reset view to defaults', 'rotate-ccw', () => {
-      this.app.commands ? this.app.commands.executeCommandById('aethergraph:reset-aethergraph')
+      this.app.commands ? this.app.commands.executeCommandById('aethergraph:reset-view')
         : null;
     });
   }
@@ -2994,24 +2698,17 @@ class AetherView extends ItemView {
     this.query = String(q || '').toLowerCase();
     if (this.filterInput) this.filterInput.value = q || '';
     this.relayout();
-    this.tel.mark('filter.menu', { len: this.query.length, hits: this.nodes.length });
   }
 
   resize() {
     if (!this.canvas) return;
     const dpr = window.devicePixelRatio || 1;
     this.dpr = dpr;
-    this.W = this.contentEl.clientWidth;
-    const chromeH = this.bar ? (this.bar.offsetHeight || 40) : 40;
-    this.H = Math.max(120, this.contentEl.clientHeight - chromeH);
+    this.W = Math.max(1, this.stack.clientWidth || this.contentEl.clientWidth);
+    this.H = Math.max(120, this.stack.clientHeight || this.contentEl.clientHeight);
     this.canvas.width = Math.round(this.W * dpr); this.canvas.height = Math.round(this.H * dpr);
-    this.canvas.style.width = this.W + 'px'; this.canvas.style.height = this.H + 'px';
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (this.gl) this.gl.resize(this.W, this.H, dpr);
-    if (this.tel && (this._lastW !== this.W || this._lastH !== this.H)) {
-      this._lastW = this.W; this._lastH = this.H;
-      this.tel.mark('resize', { w: this.W, h: this.H, dpr, px: Math.round(this.W * this.H * dpr * dpr) });
-    }
   }
 
   loop() {
@@ -3042,8 +2739,7 @@ class AetherView extends ItemView {
         this.simMs = this.simMs * 0.8 + p.sim * 0.2;
         /* The first version compared frameMs against single thresholds, so the controller
            oscillated: skipping a tick made the frame fast, which un-skipped it, which made the
-           frame slow. Telemetry counted 1,223 of these flips in one session — the throttle
-           spent its time hunting rather than throttling.
+           frame slow. The throttle then spends its time hunting rather than throttling.
            Two fixes: separate raise/lower thresholds (hysteresis), and a minimum dwell before
            it may change its mind again. */
         const up = [0, 21, 30], down = [0, 15, 23];
@@ -3054,12 +2750,10 @@ class AetherView extends ItemView {
           if (skip !== this.simSkip) {
             this.simSkip = skip;
             this._dwell = 30;                    /* ~half a second before it may move again */
-            this.tel.mark('sim.throttle', { skip, frameMs: +this.frameMs.toFixed(1) });
           }
         }
         this.simPhase = this.simSkip;
-        this.tel.count('sim.ticks');
-      } else this.tel.count('sim.skipped');
+      }
     }
 
     this.updateCamera();
@@ -3067,21 +2761,7 @@ class AetherView extends ItemView {
 
     p.total = performance.now() - t0;
     this.frameMs = this.frameMs * 0.88 + p.total * 0.12;
-    this.tel.tick(p, p.total >= this.tel.slowMs ? this.slowContext() : null);
     if (this.s.perf && (this.t * 62 | 0) % 20 === 0) this.updateInfo();
-  }
-
-  /* Only built when a frame was actually slow, so it costs nothing in the common case. */
-  slowContext() {
-    return {
-      renderer: this.gl ? 'gl' : '2d',
-      nodes: this.nodes.length,
-      edges: this.visibleEdgeCount, edgesAll: this.allEdgeCount,
-      density: this.s.density, space: this.s.layout, tier: this.s.tierBy, mode: this.s.connectionMode,
-      flow: this.s.showFlow && !this.reducedMotion ? 1 : 0, labels: this.s.labels ? 1 : 0,
-      focus: this._near ? 1 : 0, simSkip: this.simSkip,
-      dist: Math.round(this.cam.dist),
-    };
   }
 
   /* dim doubles as the focus channel: 0..1 is opacity, +2 marks hover/focus for the halo. */
@@ -3090,7 +2770,7 @@ class AetherView extends ItemView {
     for (let i = 0; i < N.length; i++) {
       const n = N[i], o = i * 4;
       buf[o] = n.x; buf[o + 1] = n.y; buf[o + 2] = n.z;
-      let dim = near ? (near.has(i) ? 1 : 0.06) : 1;
+      let dim = near ? (near.has(i) ? 1 : 0.16) : 1;
       if (n === this.focus || n === this.hover || n === this.pinned) dim += 2;
       buf[o + 3] = dim;
     }
@@ -3113,12 +2793,11 @@ class AetherView extends ItemView {
          payload until frame coverage stopped collapsing (19.1% → 9.2%) and the strata read
          again; 0.34/0.85 with alpha 0.085 is the knee, where edges are still plainly there. */
       widthBase: 0.34, widthScale: 0.85,
-      alphaExplicit: 0.085, alphaLatent: 0.018, alphaLatentScale: 0.13,
+      alphaExplicit: 0.16, alphaLatent: 0.035, alphaLatentScale: 0.15,
     };
     const td = performance.now();
     this.gl.draw(this.vp, opts);
     p.draw = performance.now() - td;
-    this.tel.count('gl.drawCalls', 2);
 
     /* Picking runs only when the cursor moved. It is a one-pixel readback, but a readback all
        the same, so it does not belong in an idle frame. */
@@ -3126,7 +2805,6 @@ class AetherView extends ItemView {
       const tp = performance.now();
       const id = this.gl.pick(this.vp, this.pickAt.x, this.pickAt.y, opts);
       p.pick = performance.now() - tp;
-      this.tel.count('pick');
       this.noteHover(id >= 0 && id < this.nodes.length ? this.nodes[id] : null);
       this.pickAt = null;
     }
@@ -3136,18 +2814,8 @@ class AetherView extends ItemView {
     p.overlay = performance.now() - to;
   }
 
-  /* Hover is recorded only once it becomes attention. Logging every crossing of the cursor
-     would produce thousands of events a minute and bury the ones that mean something. */
   noteHover(n) {
     if (n === this.hover) return;
-    const prev = this.hover, since = this._hoverSince || 0;
-    if (prev && since) {
-      const dwell = Date.now() - since;
-      if (dwell >= TEL.HOVER_DWELL_MS) {
-        this.tel.mark('hover', Object.assign({ ms: dwell }, this.tel.ref(prev.d)));
-        this.tel.count('hover.dwelt');
-      }
-    }
     this.hover = n;
     this._hoverSince = n ? Date.now() : 0;
   }
@@ -3160,8 +2828,8 @@ class AetherView extends ItemView {
     /* no cached projection table in GL mode — the GPU holds the positions, and the handful of
        overlay marks project on demand rather than paying for every node */
     this.proj = null;
-    const near = this._near, dim = near ? 0.06 : 1;
-    const fog = (p) => clamp(1 - (p.clipW - this.cam.dist * 0.55) / (this.cam.dist * 2.4), 0.12, 1);
+    const near = this._near, dim = near ? 0.16 : 1;
+    const fog = (p) => clamp(1 - (p.clipW - this.cam.dist * 0.55) / (this.cam.dist * 2.4), 0.18, 1);
     if (this.s.layout === 'strata' && this.s.tierBy !== 'flat') this.drawPlanes(ctx);
 
     if (this.s.showSevered && this.data.severed) this.drawSevered(ctx);
@@ -3180,10 +2848,13 @@ class AetherView extends ItemView {
     const d = n.d, sp = d.standing_parts || {}, r = this.relations(n);
     const card = this.card = this.contentEl.createDiv({ cls: 'ag-card' });
     card.setAttr('role', 'region');
-    card.setAttr('aria-label', `Details and connections for ${displayTitle(d)}`);
+    card.setAttr('aria-label', `Details and connections for ${this.titleFor(n)}`);
 
     const head = card.createDiv({ cls: 'ag-card-head' });
-    head.createDiv({ cls: 'ag-card-title', text: displayTitle(d) });
+    const cardTitle = head.createEl('button', { cls: 'ag-card-title ag-card-link', text: this.titleFor(n) });
+    cardTitle.setAttr('type', 'button');
+    cardTitle.setAttr('aria-label', `Open ${this.titleFor(n)}`);
+    cardTitle.onclick = () => this.openNote(n, false);
     const x = head.createEl('button', { cls: 'ag-p-x', text: '×' });
     x.setAttr('type', 'button'); x.setAttr('aria-label', 'Close note details');
     x.onclick = () => this.clearSelection();
@@ -3246,9 +2917,10 @@ class AetherView extends ItemView {
       b.createDiv({ cls: 'ag-card-n', text: String(v) });
       b.createDiv({ cls: 'ag-card-l', text: label });
     };
-    stat(`${r.visible.total}/${r.all.total}`, 'shown / typed');
-    stat(r.visible.direct, 'direct');
-    stat(r.visible.contextual, 'contextual');
+    stat(`${r.visible.total}/${r.all.total}`, 'visualized / typed');
+    stat(r.visible.primary, 'primary');
+    stat(r.visible.context, 'context');
+    stat(r.visible.archive, 'archive');
 
     const connectionItems = this.connectionItems(n, this.cardShowAll);
     const shownItems = connectionItems.slice(0, 8);
@@ -3260,12 +2932,17 @@ class AetherView extends ItemView {
       const list = connectionSection.createEl('ul', { cls: 'ag-card-connections' });
       for (const item of shownItems) {
         const li = list.createEl('li', { cls: 'ag-connection' });
-        const destination = li.createEl('button', { cls: 'ag-connection-title', text: displayTitle(item.node.d) });
+        const destination = li.createEl('button', { cls: 'ag-connection-title', text: this.titleFor(item.node) });
         destination.setAttr('type', 'button');
-        destination.setAttr('aria-label', `Select ${displayTitle(item.node.d)}`);
-        destination.onclick = () => this.select(item.node);
+        destination.setAttr('aria-label', `Open ${this.titleFor(item.node)}`);
+        destination.onclick = () => this.openNote(item.node, false);
+        const focus = li.createEl('button', { cls: 'ag-connection-focus', text: 'Focus' });
+        focus.setAttr('type', 'button');
+        focus.setAttr('aria-label', `Focus ${this.titleFor(item.node)} in Aethergraph`);
+        focus.onclick = () => this.select(item.node);
         const meta = li.createDiv({ cls: 'ag-connection-meta' });
-        meta.createSpan({ text: item.kind === 'explicit' ? 'direct' : edgePresentation(item.edge, item.kind, this.presentationVocab) });
+        meta.createSpan({ text: item.presentation });
+        meta.createSpan({ text: item.kind === 'explicit' ? 'declared link' : 'derived relation' });
         meta.createSpan({ text: item.reason });
         meta.createSpan({ text: `${Math.round(item.relevance * 100)}% relevance` });
         if (item.facetState) meta.createSpan({ cls: 'ag-facet-state', text: item.facetState });
@@ -3277,6 +2954,12 @@ class AetherView extends ItemView {
       swap.setAttr('type', 'button');
       swap.setAttr('aria-pressed', this.cardShowAll ? 'true' : 'false');
       swap.onclick = () => { this.cardShowAll = !this.cardShowAll; this.showCard(n); };
+    }
+    if (r.all.total > shownItems.length) {
+      const browse = connectionSection.createEl('button', { cls: 'ag-card-more',
+        text: `Browse all ${r.all.total.toLocaleString()} typed connections` });
+      browse.setAttr('type', 'button');
+      browse.onclick = () => new ConnectionsModal(this.app, this, n).open();
     }
 
     const kv = card.createDiv({ cls: 'ag-p-kv' });
@@ -3302,8 +2985,6 @@ class AetherView extends ItemView {
         const chip = f.createEl('button', { cls: 'ag-chip', text: name });
         chip.setAttr('type', 'button');
         chip.setAttr('aria-label', `Filter to ${name}`);
-        chip.style.borderColor = `hsla(${hueFor(name)},60%,65%,0.55)`;
-        chip.style.color = `hsl(${hueFor(name)},60%,78%)`;
         chip.onclick = () => this.applyFilter(name);
       }
     };
@@ -3317,7 +2998,20 @@ class AetherView extends ItemView {
     if (d.privacy && d.privacy !== 'agent-safe') {
       card.createDiv({ cls: 'ag-tip-priv', text: d.privacy });
     }
-    card.createDiv({ cls: 'ag-card-path', text: d.path });
+    const pathLink = card.createEl('button', { cls: 'ag-card-path ag-card-link', text: d.path });
+    pathLink.setAttr('type', 'button');
+    pathLink.setAttr('aria-label', `Open ${d.path}`);
+    pathLink.onclick = () => this.openNote(n, false);
+    const sourceTarget = safeNoteTarget(d.source_path);
+    const noteTarget = safeNoteTarget(d.path);
+    if (sourceTarget && (!noteTarget || sourceTarget.path !== noteTarget.path
+        || sourceTarget.subpath !== noteTarget.subpath)) {
+      const sourceLink = card.createEl('button', { cls: 'ag-card-path ag-card-link',
+        text: `Source · ${d.source_path}` });
+      sourceLink.setAttr('type', 'button');
+      sourceLink.setAttr('aria-label', `Open source ${d.source_path}`);
+      sourceLink.onclick = () => this.openNote({ d: { path: d.source_path } }, false);
+    }
 
     const acts = card.createDiv({ cls: 'ag-card-acts' });
     const btn = (label, fn, primary) => {
@@ -3332,7 +3026,6 @@ class AetherView extends ItemView {
       const menu = new Menu();
       this.nodeMenu(menu, n);
       menu.showAtMouseEvent(ev);
-      this.tel.mark('menu.open', this.tel.ref(d));
     });
   }
 
@@ -3340,21 +3033,20 @@ class AetherView extends ItemView {
     const best = this.hover;
     /* the pinned card supersedes the hover tooltip — two overlapping panels reading the same
        fields is noise, and the card is the one you asked for */
-    if (this.pinned) { if (this.tip) this.tip.style.display = 'none'; return; }
-    if (!best || !this.mouse) { if (this.tip) this.tip.style.display = 'none'; return; }
+    if (this.pinned) { if (this.tip) this.tip.hidden = true; return; }
+    if (!best || !this.mouse) { if (this.tip) this.tip.hidden = true; return; }
     const d = best.d, sp = d.standing_parts || {};
-    this.tip.style.display = '';
+    this.tip.hidden = false;
     this.tip.style.left = (this.mouse.x + 16) + 'px';
     this.tip.style.top = (this.mouse.y + 12) + 'px';
     this.tip.empty();
-    this.tip.createDiv({ cls: 'ag-tip-title', text: displayTitle(d) });
+    this.tip.createDiv({ cls: 'ag-tip-title', text: this.titleFor(best) });
     this.tip.createDiv({ cls: 'ag-tip-meta', text: `${d.type || 'note'}${d.project ? ' · ' + d.project : ''}` });
     if (typeof d.description === 'string' && d.description.trim()) {
       this.tip.createDiv({ cls: 'ag-tip-description', text: clipLabel(d.description.trim(), 150) });
     }
-    const st = this.tip.createDiv({ cls: 'ag-tip-lane' });
+    const st = this.tip.createDiv({ cls: `ag-tip-lane is-${LANES[best.lane].key}` });
     st.setText(`standing ${(d.standing === undefined ? 0 : d.standing).toFixed(2)} — prov ${sp.provenance || 0} · corrob ${sp.corroboration || 1} · load ${sp.load || 0}${sp.contested ? ' · CONTESTED' : ''}`);
-    st.style.color = LANES[best.lane].color;
     this.tip.createDiv({ cls: 'ag-tip-meta',
       text: `tier: ${best.tier ? best.tier.label : '—'} · ${d.family || '—'} · ${d.mass ? (d.mass / 1024).toFixed(0) + ' KB' : '—'}` });
     if (d.privacy !== 'agent-safe') this.tip.createDiv({ cls: 'ag-tip-priv', text: d.privacy });
@@ -3413,11 +3105,11 @@ class AetherView extends ItemView {
     if (!this.nodes.length) { if (p) p.draw = performance.now() - t2; return; }
     if (p) this._t2 = t2;
     const near = this._near;
-    const dim = near ? 0.06 : 1;
+    const dim = near ? 0.16 : 1;
     const vocab = this.data.facet_vocab || [];
     const recallPeak = this.nodes.reduce((peak, n) => n.recall ? Math.max(peak, n.recall.activation) : peak, 0);
     this.proj = this.nodes.map(n => this.project(n));
-    const fog = (p) => clamp(1 - (p.clipW - this.cam.dist * 0.55) / (this.cam.dist * 2.4), 0.12, 1);
+    const fog = (p) => clamp(1 - (p.clipW - this.cam.dist * 0.55) / (this.cam.dist * 2.4), 0.18, 1);
     this.pickHover2D();
 
     if (this.s.layout === 'strata' && this.s.tierBy !== 'flat') this.drawPlanes(ctx);
@@ -3430,7 +3122,7 @@ class AetherView extends ItemView {
         if (!p || !q || p.behind || q.behind) continue;
         const vis = !near || (near.has(e[0]) && near.has(e[1]));
         const muted = facetState !== 0;
-        const facetAlpha = facetState === 1 ? 0.46 : facetState === -1 ? 0.32 : 1;
+        const facetAlpha = facetState === 1 ? 0.56 : facetState === -1 ? 0.72 : 1;
         const a = (isLatent ? 0.06 + e[2] * 0.34 : 0.30) * (vis ? 1 : dim) * fog(p) * facetAlpha;
         if (a < 0.015) continue;
         const hue = muted ? 215 : (e[3] >= 0 ? hueFor(vocab[e[3]]) : 210);
@@ -3470,14 +3162,14 @@ class AetherView extends ItemView {
       const vis = !near || near.has(i);
       const recallAlpha = n.recall && recallPeak > 0
         ? 0.35 + 0.65 * clamp(n.recall.activation / recallPeak, 0, 1) : 1;
-      const alpha = (vis ? 1 : dim) * (1 - (d.age === undefined ? 0.4 : d.age) * 0.5)
+      const alpha = (vis ? 1 : dim) * (1 - (d.age === undefined ? 0.4 : d.age) * 0.24)
         * fog(s) * recallAlpha;
       if (alpha < 0.02) continue;
       const r = clamp(this.radius[i] * s.k, 1.2, 34);
       const sides = FAMILY_SHAPE[d.family] === undefined ? 0 : FAMILY_SHAPE[d.family];
       const rot = FAMILY_ROT[d.family] || 0;
       const sat = clamp(46 + (d.corroboration || 1) * 13, 40, 92);
-      const solid = clamp(0.30 + (d.standing || 0) * 0.9, 0.22, 0.95);
+      const solid = clamp(0.42 + (d.standing || 0) * 0.58, 0.36, 0.96);
       const facets = (d.facets && d.facets.length) ? d.facets.slice(0, 5) : [d.project || d.type || '·'];
       const step = (Math.PI * 2) / facets.length;
       for (let f = 0; f < facets.length; f++) {
@@ -3509,7 +3201,9 @@ class AetherView extends ItemView {
         poly(ctx, s.x, s.y, r + 3.4, sides, rot); ctx.stroke(); ctx.restore();
       }
       if (this.focus === n || this.hover === n) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.92)'; ctx.lineWidth = 2;
+        ctx.strokeStyle = document.body.classList.contains('theme-light')
+          ? 'rgba(22,34,52,0.92)' : 'rgba(255,255,255,0.92)';
+        ctx.lineWidth = 2;
         poly(ctx, s.x, s.y, r + 5.5, sides, rot); ctx.stroke();
       }
     }
@@ -3520,7 +3214,7 @@ class AetherView extends ItemView {
     this.showTip();
     /* the 2D path has no phase separation to offer — it is one long immediate-mode pass, which
        is precisely the property that made it slow */
-    if (p) { p.draw = performance.now() - this._t2; this.tel.count('canvas2d.frames'); }
+    if (p) p.draw = performance.now() - this._t2;
   }
 
   /* ---------------------------------------------------------------- semantic-zoom labels
@@ -3529,23 +3223,15 @@ class AetherView extends ItemView {
    * bands that erased the graph. Gating on degree does not fix that — it just picks a
    * different few thousand.
    *
-   * So labels MERGE. The screen is binned into label-sized cells; every node that lands in a
-   * cell joins that cell's cluster, and each cell emits exactly ONE label. What that label
-   * says depends on what the cluster has in common:
-   *
-   *   one note              -> its title
-   *   a few, sharing a facet-> the facet, and how many
-   *   many, sharing nothing -> the coarsest thing they do share: project, then area
-   *
-   * Zoom does the rest by itself, which is the point of doing it in screen space. Far away,
-   * hundreds of nodes fall into one cell and you read "metaphysics · 240" — the high concept.
-   * Zoom in and they spread across many cells, the clusters shrink, the shared term becomes
-   * more specific, and eventually each cell holds one note and you read its title. No zoom
-   * thresholds to tune: the projection already knows how far away you are.
+   * So marks POOL. Screen-space regions accumulate semantic color and bounded energy, yielding
+   * adjacent soft glows that read as one liquid-light neighborhood. Only a small set speaks:
+   * document-grounded subject/topic/tag/facet candidates are scored by visible-corpus IDF,
+   * globally deduplicated, measured, and collision-tested. Structural folder contexts never
+   * become topical headings. Zoom naturally resolves pools toward individual document titles.
    */
   drawLabels(ctx, near, dim, fog) {
     const W = this.W, H = this.H;
-    const CW = 168, CH = 26;                       /* a label's footprint, in pixels */
+    const CW = 210, CH = 82;                       /* a semantic pool's screen footprint */
     const cols = Math.ceil(W / CW) + 1;
     const cells = this._cells || (this._cells = new Map());
     const pool = this._pool || (this._pool = []);
@@ -3559,97 +3245,132 @@ class AetherView extends ItemView {
       if (!vis && this.focus !== n) continue;
       this.project(n, s);
       if (s.behind || s.x < -CW || s.y < -CH || s.x > W + CW || s.y > H + CH) continue;
-      const key = ((s.y / CH) | 0) * cols + ((s.x / CW) | 0);
+      const screenCell = Math.floor(s.y / CH) * cols + Math.floor(s.x / CW);
+      const depthUnit = Math.max(80, this.cam.dist * 0.16);
+      const depthBand = Math.round(s.clipW / depthUnit);
+      const semantic = n.poolSemantic;
+      const key = semantic
+        ? `${screenCell}|${depthBand}|${semantic.key}`
+        : `${screenCell}|${depthBand}|@${i}`;
       let c = cells.get(key);
       if (c === undefined) {
-        c = pool[used] || (pool[used] = { n: 0, x: 0, y: 0, w: 0, best: null, bestW: -1,
-          subjects: new Map(), topics: new Map(), contexts: new Map(), facets: new Map(),
-          projects: new Map(), areas: new Map() });
+        c = pool[used] || (pool[used] = { n: 0, x: 0, y: 0, w: 0, a: 0, hueX: 0, hueY: 0,
+          priority: 0, best: null, bestW: -1, subjects: new Map(), topics: new Map(),
+          tags: new Map(), facets: new Map() });
         used++;
-        c.n = 0; c.x = 0; c.y = 0; c.w = 0; c.best = null; c.bestW = -1;
-        c.subjects.clear(); c.topics.clear(); c.contexts.clear(); c.facets.clear();
-        c.projects.clear(); c.areas.clear();
+        c.n = 0; c.x = 0; c.y = 0; c.w = 0; c.a = 0; c.hueX = 0; c.hueY = 0;
+        c.priority = 0; c.best = null; c.bestW = -1;
+        c.semantic = semantic;
+        c.subjects.clear(); c.topics.clear(); c.tags.clear(); c.facets.clear();
         cells.set(key, c);
       }
-      /* weight decides which single note speaks for a singleton cluster, and which clusters
-         survive the budget: load-bearing, well-connected, near the camera */
-      const w = (1 + n.deg) * (0.4 + (d.standing || 0)) * (s.k > 0 ? s.k : 0.01);
-      c.n++; c.x += s.x; c.y += s.y; c.w += w;
+      const importance = Number(d.synthesis && d.synthesis.importance && d.synthesis.importance.score)
+        || Number(d.standing) || 0;
+      const activation = n.recall ? n.recall.activation : 0;
+      const w = (0.55 + importance * 1.8 + activation * 1.2 + Math.log2(n.deg + 2) * 0.18)
+        * (s.k > 0 ? s.k : 0.01);
+      const alpha = (vis ? 1 : dim) * fog(s);
+      const terms = n.labelTerms;
+      const hueTerm = terms.subjects[0] || terms.topics[0] || terms.tags[0]
+        || terms.facets[0] || d.type || 'note';
+      const hr = hueFor(hueTerm) * Math.PI / 180;
+      c.n++; c.x += s.x; c.y += s.y; c.w += w; c.a += alpha;
+      c.hueX += Math.cos(hr) * w; c.hueY += Math.sin(hr) * w;
+      const priority = (n === this.focus || n === this.hover || n === this.pinned) ? 3
+        : n.recall && n.recall.selected ? 2 : 0;
+      c.priority = Math.max(c.priority, priority);
       if (w > c.bestW) { c.bestW = w; c.best = n; c.bestY = s.y + this.radius[i] * s.k + 11; c.bestX = s.x; }
-      const subjects = nodeSubjects(d);
-      for (const subject of subjects) c.subjects.set(subject, (c.subjects.get(subject) || 0) + 1);
-      const topics = nodeTopics(d);
-      for (const topic of topics) c.topics.set(topic, (c.topics.get(topic) || 0) + 1);
-      const contexts = nodeContexts(d);
-      for (const context of contexts) c.contexts.set(context, (c.contexts.get(context) || 0) + 1);
-      const fs = termNames(d.facets);
-      for (const facet of fs) c.facets.set(facet, (c.facets.get(facet) || 0) + 1);
-      if (d.project) c.projects.set(d.project, (c.projects.get(d.project) || 0) + 1);
-      if (d.area) c.areas.set(d.area, (c.areas.get(d.area) || 0) + 1);
+      for (const subject of terms.subjects) c.subjects.set(subject, (c.subjects.get(subject) || 0) + 1);
+      for (const topic of terms.topics) c.topics.set(topic, (c.topics.get(topic) || 0) + 1);
+      for (const tag of terms.tags) c.tags.set(tag, (c.tags.get(tag) || 0) + 1);
+      for (const facet of terms.facets) c.facets.set(facet, (c.facets.get(facet) || 0) + 1);
     }
 
-    /* the cluster the cursor or focus is in always speaks, and always in full detail */
     const list = [];
     for (const c of cells.values()) list.push(c);
-    list.sort((a, b) => b.w - a.w);
-    const budget = Math.min(list.length, 150);
-    const sources = { title: 0, subject: 0, topic: 0, context: 0, facet: 0,
-      project: 0, area: 0, neutral: 0 };
+    list.sort((a, b) => b.priority - a.priority || b.w - a.w);
+    const budget = Math.min(list.length, clamp(Math.floor(W * H / 50000), 18, 48));
+    const poolBudget = Math.min(list.length, 40);
+
+    /* Soft additive regions carry density and affinity while crisp representatives carry names.
+       Adjacent ellipses blend into liquid-light pools without a blur pass or per-node label. */
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    this.poolDrawCount = 0;
+    for (let k = 0; k < poolBudget; k++) {
+      const c = list[k];
+      if (c.n < 2) continue;
+      const x = c.x / c.n, y = c.y / c.n;
+      const rx = clamp(32 + Math.sqrt(Math.log2(c.n + 1)) * 24, 36, 92);
+      const ry = clamp(rx * 0.56, 24, 56);
+      const hue = (Math.atan2(c.hueY, c.hueX) * 180 / Math.PI + 360) % 360;
+      const alpha = clamp(0.028 + Math.log2(c.n + 1) * 0.015, 0.04, 0.13)
+        * clamp(c.a / c.n, 0.35, 1);
+      ctx.save(); ctx.translate(x, y); ctx.scale(rx, ry);
+      const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+      glow.addColorStop(0, `hsla(${hue},78%,66%,${alpha})`);
+      glow.addColorStop(0.42, `hsla(${hue},70%,56%,${alpha * 0.55})`);
+      glow.addColorStop(1, `hsla(${hue},62%,46%,0)`);
+      ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      this.poolDrawCount++;
+    }
+    ctx.restore();
+
+    const usedLabels = new Map();
+    const boxes = [];
+    const stackRect = this.stack && this.stack.getBoundingClientRect ? this.stack.getBoundingClientRect() : null;
+    const cardRect = this.card && this.card.getBoundingClientRect ? this.card.getBoundingClientRect() : null;
+    const reserved = stackRect && cardRect ? {
+      x1: cardRect.left - stackRect.left - 8, y1: cardRect.top - stackRect.top - 8,
+      x2: cardRect.right - stackRect.left + 8, y2: cardRect.bottom - stackRect.top + 8,
+    } : null;
+    const intersects = (a, b) => a.x1 < b.x2 && a.x2 > b.x1 && a.y1 < b.y2 && a.y2 > b.y1;
 
     ctx.textAlign = 'center';
-    for (let k = 0; k < budget; k++) {
+    let drawn = 0;
+    for (let k = 0; k < list.length && drawn < budget; k++) {
       const c = list[k];
       const merged = c.n > 1;
-      let text, weight;
-      if (!merged) {
-        text = clipLabel(displayTitle(c.best.d), 30);
-        weight = 0;
-        sources.title++;
+      const candidate = merged && c.semantic ? c.semantic : null;
+      let text;
+      if (candidate) {
+        if (c.priority) {
+          text = `${this.titleFor(c.best)} +${c.n - 1} alike`;
+          usedLabels.set(normalizedLabel(text), 1);
+        } else {
+          if (usedLabels.has(candidate.key)) continue;
+          usedLabels.set(candidate.key, 1);
+          text = `${candidate.label} · ${c.n}`;
+        }
       } else {
-        /* the most specific term the cluster actually shares, then how many it speaks for */
-        const top = (m) => {
-          let bk = null, bv = 0;
-          for (const [kk, vv] of m) {
-            if (vv > bv || (vv === bv && (bk === null || String(kk).localeCompare(String(bk)) < 0))) {
-              bv = vv; bk = kk;
-            }
-          }
-          return [bk, bv];
-        };
-        const [subject, sn] = top(c.subjects);
-        const [topic, tn] = top(c.topics);
-        const [context, cn] = top(c.contexts);
-        const [f, fn] = top(c.facets);
-        const [p, pn] = top(c.projects);
-        const [ar, an] = top(c.areas);
-        const threshold = c.n * 0.6;
-        if (subject && sn >= threshold) { text = subject; weight = 2; sources.subject++; }
-        else if (topic && tn >= threshold) { text = topic; weight = 2; sources.topic++; }
-        else if (context && cn >= threshold) { text = context; weight = 2; sources.context++; }
-        else if (f && fn >= threshold) { text = f; weight = 2; sources.facet++; }
-        else if (p && pn >= threshold) { text = p; weight = 1; sources.project++; }
-        else if (ar && an >= threshold) { text = String(ar).replace(/^\d+\s+/, ''); weight = 1; sources.area++; }
-        else { text = `${c.n} notes`; weight = 0; sources.neutral++; }
-        if (weight > 0) text = text + ' · ' + c.n;
+        const title = this.titleFor(c.best);
+        if (merged) continue;
+        text = title;
+        const key = normalizedLabel(text);
+        if (!c.priority && usedLabels.has(key)) continue;
+        usedLabels.set(key, 1);
       }
+      text = clipLabel(text, merged ? 42 : 36);
       const x = merged ? c.x / c.n : c.bestX;
       const y = merged ? c.y / c.n : c.bestY;
-      const a = clamp(0.35 + c.w / (list[0].w || 1) * 0.65, 0.3, 1) * (near ? 1 : 1);
-      if (merged) {
-        /* the high-concept labels read as a different kind of thing to a note title */
-        ctx.font = `${weight === 2 ? 11.5 : 10.5}px var(--font-interface)`;
-        ctx.fillStyle = weight === 2
-          ? `hsla(${hueFor(text.split(' · ')[0])},62%,78%,${a})`
-          : `rgba(210,222,242,${a * 0.85})`;
-      } else {
-        ctx.font = '10px var(--font-interface)';
-        ctx.fillStyle = `rgba(226,232,245,${a * 0.8})`;
-      }
+      ctx.font = merged ? '600 11.5px var(--font-interface)' : '500 10.5px var(--font-interface)';
+      const width = Math.ceil(ctx.measureText(text).width) + 12;
+      const box = { x1: x - width / 2, x2: x + width / 2, y1: y - 9, y2: y + 8 };
+      if (!c.priority && (y < 54 || y > H - 30 || x < width / 2 + 6 || x > W - width / 2 - 6
+          || (reserved && intersects(box, reserved)) || boxes.some(other => intersects(box, other)))) continue;
+      boxes.push(box);
+      const a = clamp(0.72 + c.w / (list[0].w || 1) * 0.28, 0.72, 1);
+      const lightTheme = document.body.classList.contains('theme-light');
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = lightTheme ? `rgba(248,250,253,${a * 0.90})` : `rgba(7,9,14,${a * 0.88})`;
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = candidate
+        ? `hsla(${hueFor(candidate.key)},${lightTheme ? 64 : 68}%,${lightTheme ? 30 : 82}%,${a})`
+        : lightTheme ? `rgba(31,43,61,${a})` : `rgba(235,240,250,${a})`;
       ctx.fillText(text, x, y);
+      drawn++;
     }
-    this.tel.count('labels.drawn', budget);
-    this.tel.count('labels.clusters', list.length);
-    for (const [source, count] of Object.entries(sources)) if (count) this.tel.count('labels.source.' + source, count);
   }
 
   /* ---------------------------------------------------------------- shared overlay pieces */
@@ -3763,168 +3484,131 @@ class AetherView extends ItemView {
   }
 }
 
+class ConnectionsModal extends Modal {
+  constructor(app, view, node) {
+    super(app);
+    this.view = view;
+    this.node = node;
+    this.items = view.connectionItems(node, true);
+    this.limit = 60;
+    this.query = '';
+  }
+  onOpen() {
+    this.titleEl.setText(`Connections · ${this.view.titleFor(this.node)}`);
+    this.contentEl.addClass('ag-connections-modal');
+    const input = this.contentEl.createEl('input', { cls: 'ag-connections-search', type: 'search' });
+    input.placeholder = 'Filter by title, path, subject, tag, or reason';
+    input.setAttr('aria-label', 'Filter typed connections');
+    this.summary = this.contentEl.createDiv({ cls: 'ag-connections-summary' });
+    this.list = this.contentEl.createEl('ul', { cls: 'ag-connections-list' });
+    this.more = this.contentEl.createEl('button', { cls: 'ag-card-more', text: 'Show more' });
+    this.more.setAttr('type', 'button');
+    this.more.onclick = () => { this.limit += 60; this.render(); };
+    this.registerDomEvent(input, 'input', () => {
+      this.query = normalizedLabel(input.value);
+      this.limit = 60;
+      this.render();
+    });
+    this.render();
+    input.focus();
+  }
+  render() {
+    const filtered = this.items.filter(item => {
+      if (!this.query) return true;
+      const d = item.node.d;
+      const haystack = normalizedLabel([this.view.titleFor(item.node), d.path, item.reason,
+        ...nodeSubjects(d), ...nodeTopics(d), ...nodeDisplayTags(d), ...termNames(d.facets)].join(' '));
+      return haystack.includes(this.query);
+    });
+    const shown = filtered.slice(0, this.limit);
+    this.summary.setText(`${shown.length.toLocaleString()} of ${filtered.length.toLocaleString()} matching · `
+      + `${this.items.length.toLocaleString()} typed total`);
+    this.list.empty();
+    for (const item of shown) {
+      const li = this.list.createEl('li', { cls: 'ag-connections-list-item' });
+      const text = li.createDiv({ cls: 'ag-connections-list-main' });
+      const open = text.createEl('button', { cls: 'ag-connection-title', text: this.view.titleFor(item.node) });
+      open.setAttr('type', 'button');
+      open.onclick = async () => { if (await this.view.openNote(item.node, false)) this.close(); };
+      text.createDiv({ cls: 'ag-connection-meta', text: `${item.presentation} · `
+        + `${item.kind === 'explicit' ? 'declared link' : 'derived relation'} · ${item.reason} · `
+        + `${Math.round(item.relevance * 100)}% relevance` });
+      text.createDiv({ cls: 'ag-connections-path', text: item.node.d.path });
+      const focus = li.createEl('button', { cls: 'ag-connection-focus', text: 'Focus' });
+      focus.setAttr('type', 'button');
+      focus.onclick = () => { this.view.select(item.node); this.close(); };
+    }
+    this.more.hidden = shown.length >= filtered.length;
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
 /* ------------------------------------------------------------------ plugin */
 module.exports = class Aethergraph extends Plugin {
   async onload() {
     this.settings = sanitize(await this.loadData());
-    this.tel = new Telemetry(this);
-    this.tel.env.obsidian = (this.app && this.app.vault && this.app.vault.adapter
-      && this.app.vault.adapter.constructor && this.app.vault.adapter.constructor.name) || 'unknown';
-    this.tel.env.platform = navigator.platform;
-    this.tel.env.cores = navigator.hardwareConcurrency || 'unknown';
-    if (navigator.deviceMemory) this.tel.env.memoryGB = navigator.deviceMemory;
-    this.tel.mark('plugin.load');
-    /* a periodic flush so a hard crash costs at most FLUSH_MS of history */
-    this.registerInterval(window.setInterval(() => this.tel.flush(), TEL.FLUSH_MS));
-
     this.registerView(VIEW_TYPE, leaf => new AetherView(leaf, this));
     this.addRibbonIcon('git-fork', 'Aethergraph', () => this.open());
-    this.addCommand({ id: 'open', name: 'Open Aethergraph', callback: () => this.open() });
-    /* Every toggle is sticky, which is right until a session leaves the view in a state that
-       reads as broken — all edges off at full density is a cloud of dots. One command back. */
+    this.addCommand({ id: 'open', name: 'Open graph', callback: () => this.open() });
     this.addCommand({
       id: 'reset-view',
-      name: 'Reset Aethergraph view to defaults',
+      name: 'Reset view to defaults',
       callback: async () => {
         this.settings = Object.assign({}, DEFAULTS);
         await this.saveData(this.settings);
         for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
-          const v = leaf.view;
-          if (!v || !v.relayout) continue;
-          v.s = Object.assign({}, DEFAULTS);
-          v.contentEl.empty();
-          await v.onOpen();
+          const view = leaf.view;
+          if (view && view.resetToDefaults) view.resetToDefaults();
         }
         new Notice('Aethergraph: view reset — Core density, Focused connections, motion layers off.');
       },
     });
     this.addCommand({
-      id: 'diagnostics-report',
-      name: 'Write diagnostics report',
-      callback: () => this.writeReport(),
-    });
-    this.addCommand({
-      id: 'copy-diagnostics',
-      name: 'Copy diagnostics JSON to clipboard',
-      callback: async () => {
-        await navigator.clipboard.writeText(JSON.stringify(this.tel.snapshot(), null, 2));
-        new Notice('Aethergraph: diagnostics snapshot copied.');
-      },
-    });
-    this.addCommand({
-      id: 'toggle-diagnostics-file',
-      name: 'Toggle diagnostics file logging',
-      callback: async () => {
-        const next = !this.settings.telemetryFile;
-        if (next) await this.ensureDiagnosticSalt();
-        this.settings.telemetryFile = next;
-        await this.saveData(this.settings);
-        this.tel.mark('telemetry.file', { on: this.settings.telemetryFile });
-        if (!this.settings.telemetryFile) {
-          await this.tel.flush(true);
-          if (!this.tel.enabled) this.tel.reset();
-        }
-        new Notice('Aethergraph: diagnostics file logging '
-          + (this.settings.telemetryFile ? 'ON → ' + TEL.DIR : 'off'));
-      },
-    });
-    this.addCommand({
-      id: 'run-diagnostics',
-      name: 'Run diagnostics',
-      callback: () => this.diagnose(),
+      id: 'check-health',
+      name: 'Check graph health',
+      callback: () => this.checkGraphHealth(),
     });
     this.addSettingTab(new AetherSettings(this.app, this));
   }
 
-  /* A deliberate, on-demand check of everything that has ever gone wrong here, so the answer
-     to "it's not working" is a list of facts rather than a round of guessing. */
-  async diagnose() {
-    const out = [];
-    const add = (ok, msg) => out.push((ok === null ? '·' : ok ? '✓' : '✗') + ' ' + msg);
-    let gl = null;
-    try {
-      const c = document.createElement('canvas');
-      gl = c.getContext('webgl2');
-      add(!!gl, gl ? 'WebGL2 available' : 'WebGL2 NOT available — canvas 2D fallback, ~25x slower');
-      if (gl) {
-        const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-        add(null, 'GPU: ' + (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'masked'));
-      }
-    } catch (e) { add(false, 'WebGL2 probe threw: ' + e.message); }
-
+  async checkGraphHealth() {
+    const lines = [];
     try {
       const enhanced = await readEnhancedPayload(this.app);
-      const d = enhanced.data || buildBaselinePayload(this.app);
-      if (enhanced.data) add(true, `enhanced payload present at ${enhanced.path} — `
-        + `${(enhanced.raw.length / 1048576).toFixed(2)} MB, schema ${d.schema}`);
-      else add(null, 'no enhanced payload; authored-link metadata-cache baseline is available');
-      add(true, 'schema and resource bounds validated');
-      add(true, `${d.nodes.length.toLocaleString()} nodes · ${(d.explicit || []).length.toLocaleString()} direct `
-        + `· ${(d.latent || []).length.toLocaleString()} latent · ${(d.ghosts || []).length} ghosts`);
-      if (d.observed_at) {
-        const age = (Date.now() - Date.parse(d.observed_at)) / 86400000;
-        add(age <= 14, `payload is ${age.toFixed(1)} days old`);
+      const data = enhanced.data || buildBaselinePayload(this.app);
+      lines.push(enhanced.data ? `Enhanced ${data.schema} payload loaded` : 'Local authored-link baseline loaded');
+      lines.push(`${data.nodes.length.toLocaleString()} notes · `
+        + `${((data.explicit || []).length + (data.latent || []).length).toLocaleString()} typed connections`);
+      if (data.observed_at) {
+        const age = (Date.now() - Date.parse(data.observed_at)) / 86400000;
+        lines.push(`Payload age: ${age.toFixed(1)} days`);
       }
-      const coreN = d.nodes.filter(DENSITY.core.test).length;
-      const corpusN = d.nodes.filter(DENSITY.corpus.test).length;
-      add(coreN !== corpusN, `${coreN.toLocaleString()} Core · ${corpusN.toLocaleString()} Corpus notes`);
-    } catch (e) { add(false, 'graph data unavailable: ' + e.message); }
-
+      if (data.synthesis) lines.push(`Memory regions: ${regionSummary(data.synthesis).label}`);
+    } catch (error) {
+      lines.push(`Graph data unavailable: ${error.message}`);
+    }
     const views = this.app.workspace.getLeavesOfType(VIEW_TYPE);
-    add(views.length > 0, views.length ? `${views.length} view(s) open` : 'no view open');
+    lines.push(`${views.length} graph view${views.length === 1 ? '' : 's'} open`);
     for (const leaf of views) {
-      const v = leaf.view;
-      if (!v || !v.tel) continue;
-      add(!v.dead, v.dead ? 'view has STOPPED — see errors below' : 'view running');
-      add(!!v.gl, v.gl ? 'renderer: WebGL2' : 'renderer: canvas 2D fallback');
-      const s = v.tel.snapshot();
-      add(null, `${s.fps.toFixed(0)} fps median, ${s.longPct.toFixed(1)}% long frames`);
-      for (const err of s.errors) add(false, `${err.n}× ${err.where}: ${err.msg}`);
-      for (const hh of s.health) if (hh.level !== 'ok') add(false, hh.msg);
+      const view = leaf.view;
+      if (view && view.dead) lines.push('A view is stopped; inspect the developer console for its stack trace.');
+      for (const item of view && view.health || []) {
+        if (item.level !== 'ok') lines.push(`${item.level}: ${item.msg}`);
+      }
     }
-    add(null, 'file logging ' + (this.settings.telemetryFile ? 'ON → ' + TEL.DIR : 'off'));
-
-    const text = out.join('\n');
-    console.log('%c[aethergraph] diagnostics\n' + text, 'font-weight:bold');
-    this.tel.mark('diagnose', { lines: out.length });
-    new Notice('Aethergraph diagnostics\n\n' + text, 0);
-    return text;
+    new Notice('Aethergraph health\n\n' + lines.join('\n'), 0);
+    return lines.join('\n');
   }
 
-  async writeReport() {
-    try {
-      const ad = this.app.vault.adapter;
-      if (!(await ad.exists(TEL.DIR))) await ad.mkdir(TEL.DIR);
-      const d = new Date();
-      const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0')
-        + String(d.getDate()).padStart(2, '0') + '-'
-        + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0');
-      const path = `${TEL.DIR}/report-${stamp}-${this.tel.session}.md`;
-      await ad.write(path, this.tel.report());
-      this.tel.mark('report.write', { path });
-      new Notice('Aethergraph: telemetry report written to ' + path, 6000);
-      await this.app.workspace.openLinkText(path, '', false);
-    } catch (e) {
-      this.tel.err('report write', e);
-      new Notice('Aethergraph: could not write the report — ' + e.message, 8000);
-    }
-  }
   async open() {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0];
     if (!leaf) { leaf = workspace.getLeaf('tab'); await leaf.setViewState({ type: VIEW_TYPE, active: true }); }
     workspace.revealLeaf(leaf);
   }
-  async save(s) { this.settings = Object.assign(this.settings, s); await this.saveData(this.settings); }
-  async ensureDiagnosticSalt() {
-    if (!this.settings.telemetrySalt) {
-      this.settings.telemetrySalt = (this.tel && this.tel.salt) || randomSalt();
-      await this.saveData(this.settings);
-    }
-    if (this.tel) this.tel.salt = this.settings.telemetrySalt;
-  }
-  onunload() {
-    if (this.tel) { this.tel.mark('plugin.unload'); this.tel.flush(true); }
+  async save(settings) {
+    this.settings = Object.assign(this.settings, settings);
+    await this.saveData(this.settings);
   }
 };
 
@@ -3933,9 +3617,8 @@ class AetherSettings extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl('h3', { text: 'Aethergraph' });
-    containerEl.createEl('p', { text: 'Authored note links work immediately. An optional validated v3 payload at '
-      + `${PAYLOADS[0]} adds qualified semantic relations.` });
+    containerEl.createEl('p', { text: 'Authored note links work immediately. An optional validated v3 or v4 payload at '
+      + `${PAYLOADS[0]} adds qualified semantic relations and memory framing.` });
     const drop = (name, table, key) => new Setting(containerEl).setName(name).addDropdown(d => {
       Object.entries(table).forEach(([k, v]) => d.addOption(k, v));
       d.setValue(this.plugin.settings[key]);
@@ -3959,61 +3642,9 @@ class AetherSettings extends PluginSettingTab {
         t.onChange(async v => { this.plugin.settings.perf = v; await this.plugin.saveData(this.plugin.settings); });
       });
 
-    containerEl.createEl('h3', { text: 'Local diagnostics' });
-    const note = containerEl.createEl('p', { cls: 'setting-item-description' });
-    note.appendText('Diagnostics are disabled by default and stay on this machine. Nothing is sent anywhere. ');
-    note.appendText('Known privacy lanes use salted local pseudonyms; paths and titles are not recorded. ');
-    note.appendText('Missing, unknown, and policy-marked notes are withheld entirely. Your filter text is never recorded — only '
-      + 'its length and the number of hits.');
-
-    new Setting(containerEl).setName('Write a log file')
-      .setDesc(`Append JSONL to ${TEL.DIR}/ so evidence survives a crash. Rotates at 4 MB, `
-        + `keeps the last ${TEL.KEEP_FILES} files. Off by default; nothing touches disk until you turn this on.`)
-      .addToggle(t => {
-        t.setValue(this.plugin.settings.telemetryFile);
-        t.onChange(async v => {
-          if (v) await this.plugin.ensureDiagnosticSalt();
-          this.plugin.settings.telemetryFile = v;
-          await this.plugin.saveData(this.plugin.settings);
-          if (!v && this.plugin.tel) {
-            await this.plugin.tel.flush(true);
-            if (!this.plugin.tel.enabled) this.plugin.tel.reset();
-          }
-        });
-      });
-
-    new Setting(containerEl).setName('Console output')
-      .setDesc('How much reaches the developer console. "Warnings" keeps errors visible without noise.')
-      .addDropdown(d => {
-        Object.entries(CONSOLE_LEVELS).forEach(([k, v]) => d.addOption(k, v));
-        d.setValue(this.plugin.settings.telemetryConsole);
-        d.onChange(async v => { this.plugin.settings.telemetryConsole = v; await this.plugin.saveData(this.plugin.settings); });
-      });
-
-    new Setting(containerEl).setName('Slow-frame threshold')
-      .setDesc('A frame over this many milliseconds is captured with its full phase breakdown. '
-        + '24 ms is about one and a half frames at 60 Hz.')
-      .addSlider(sl => {
-        sl.setLimits(8, 100, 2).setValue(this.plugin.settings.slowFrameMs).setDynamicTooltip();
-        sl.onChange(async v => { this.plugin.settings.slowFrameMs = v; await this.plugin.saveData(this.plugin.settings); });
-      });
-
-    new Setting(containerEl).setName('Reset pseudonym salt')
-      .setDesc('Breaks the link between hashed identities in old logs and new ones. '
-        + 'Do this if a log ever leaves this machine.')
-      .addButton(b => {
-        b.setButtonText('Reset salt').setWarning();
-        b.onClick(async () => {
-          this.plugin.settings.telemetrySalt = randomSalt();
-          await this.plugin.saveData(this.plugin.settings);
-          if (this.plugin.tel) this.plugin.tel.salt = this.plugin.settings.telemetrySalt;
-          new Notice('Aethergraph: salt reset — hashes in existing logs no longer correspond.');
-        });
-      });
-
-    new Setting(containerEl).setName('Diagnostics')
-      .setDesc('Check WebGL2, the payload, its age and schema, and the running view in one pass.')
-      .addButton(b => { b.setButtonText('Run diagnostics'); b.onClick(() => this.plugin.diagnose()); });
+    new Setting(containerEl).setName('Graph health')
+      .setDesc('Inspect the local renderer, payload age, schema, and memory-region receipts without collecting or writing usage data.')
+      .addButton(button => { button.setButtonText('Check health'); button.onClick(() => this.plugin.checkGraphHealth()); });
   }
 }
 
@@ -4021,10 +3652,12 @@ class AetherSettings extends PluginSettingTab {
 module.exports.__gl = GL;
 module.exports.__sanitize = sanitize;
 module.exports.__defaults = DEFAULTS;
-module.exports.__tables = { LAYOUTS, TIERS, ANGLE_MODES, DENSITY, CONNECTION_MODES, CONSOLE_LEVELS };
-module.exports.__telemetry = { TEL, Ring, Chan, Telemetry, pseudonym, randomSalt };
+module.exports.__tables = { LAYOUTS, TIERS, ANGLE_MODES, DENSITY, CONNECTION_MODES };
 module.exports.__relations = { EDGE, edgePresentation, edgeVisible, displayTitle, termNames, nodeTopics,
-  nodeDisplayTags, nodeSubjects, nodeContexts, clipLabel, vocabLabel };
+  nodeDisplayTags, nodeSubjects, nodeContexts, normalizedLabel, humanLabel, buildLabelStats,
+  labelCandidateScore, chooseClusterLabel, bestNodeSemanticLabel, semanticPoolIdentity,
+  titleCounts, disambiguatedTitle, safeNoteTarget,
+  semanticOverlap, edgeRelevance, isNavigationScaffold, selectRenderableEdges, clipLabel, vocabLabel };
 module.exports.__synthesis = { recallTokens, directRecallFit, modulateRecall, modulateRegions, regionSummary,
   validateNodeSynthesis, validateTopSynthesis };
 module.exports.__payload = { PAYLOADS, PAYLOAD_LIMITS, validatePayload, readEnhancedPayload,

@@ -2,6 +2,20 @@
 
 All notable changes to Aethergraph are documented here.
 
+## 0.3.0 - 2026-08-02
+
+Clarity, navigation, and public-directory release.
+
+- Pools dense nearby notes into soft semantic light regions while keeping crisp document representatives above them.
+- Replaces repeated structural labels with document-frequency-ranked subjects, topics, tags, and facets; deduplicates and collision-tests an adaptive 18–48 labels per viewport.
+- Preserves complete MOC/index collections while limiting visual Context and Archive spokes for structural hubs; Primary relations remain uncapped.
+- Reports semantic Primary, Context, and Archive tiers instead of calling every explicit storage row “direct.”
+- Makes card titles, paths, connection titles, double-clicked nodes, and optional heading/block fragments open exact safe vault targets.
+- Adds a searchable incremental browser for every typed connection and keeps graph focus as a separate action.
+- Stops promoting ungrounded list/path topics into synthesized document subjects.
+- Removes client telemetry and persistent diagnostic sinks; the on-demand health check writes nothing.
+- Moves source to `src/main.js`, adds a locked reproducible minified build, and leaves `main.js` only in release assets for Obsidian directory compliance.
+
 ## 0.2.0 - 2026-08-02
 
 Holistic memory-synthesis release.
@@ -25,4 +39,4 @@ Initial public beta.
 - Applies a fail-closed diagnostic reference policy for unknown or withheld nodes.
 - Ships a synthetic v3 fixture, schema, public-boundary checks, and release automation.
 
-This beta is desktop-only while mobile behavior remains unverified.
+This release is desktop-only while mobile behavior remains unverified.
