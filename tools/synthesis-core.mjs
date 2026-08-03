@@ -475,6 +475,28 @@ function termPairs(baseValues, selected, field, maximum) {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, maximum);
 }
 
+function termAttribution(finalTerms, baseValues, selected, field) {
+  const supportByTerm = new Map();
+  const add = (term, regionId, value) => {
+    if (!supportByTerm.has(term)) supportByTerm.set(term, new Map());
+    const regions = supportByTerm.get(term);
+    regions.set(regionId, Math.max(regions.get(regionId) ?? 0, round(value)));
+  };
+  for (const [index, raw] of baseValues.entries()) {
+    const term = semanticSlug(raw);
+    if (term) add(term, "base-graph", 0.55 - Math.min(0.3, index * 0.05));
+  }
+  for (const entry of selected) {
+    const factor = entry.item.confidence * (EVIDENCE_WEIGHT[entry.item.evidence] ?? 0.15)
+      * entry.provider.region.gain;
+    for (const [term, value] of entry.item[field]) add(term, entry.provider.id, value * factor);
+  }
+  return finalTerms.map(([term]) => [term,
+    [...(supportByTerm.get(term) ?? [])].map(([regionId, value]) => [regionId, value])
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  ]);
+}
+
 function reasonValue(graph, index) {
   return graph.reason_vocab?.[index] ?? null;
 }
@@ -710,6 +732,7 @@ export function synthesizeGraph({
     const baseSubjects = groundedLabel
       ? [...(node.topics ?? []), ...(node.facets ?? [])] : [...(node.facets ?? [])];
     const subjects = termPairs(baseSubjects, framing, "subjects", 12);
+    const subjectAttribution = termAttribution(subjects, baseSubjects, framing, "subjects");
     const contexts = termPairs([node.area, node.role, node.family].filter(Boolean), framing, "contexts", 8);
     const lineages = new Set(all.flatMap((entry) => entry.item.lineage_ids));
     const attribution = new Map([["base-graph", round(0.25 + 0.5
@@ -752,6 +775,7 @@ export function synthesizeGraph({
     node.description = description;
     node.synthesis = {
       subjects,
+      subject_attribution: subjectAttribution,
       contexts,
       importance: { score: importanceScore, parts: { standing: round(standing), load: round(load),
         authority: round(authority), support: round(support) } },

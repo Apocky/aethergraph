@@ -128,6 +128,24 @@ test('v4 validation fails closed on identity, edge, vocabulary and synthesis def
   unknownRegion.nodes[0].synthesis.region_attribution[0][0] = 'invented-region';
   assert.throws(() => validatePayload(unknownRegion), /unknown region id/);
 
+  const unknownSubjectRegion = payload();
+  unknownSubjectRegion.nodes[0].synthesis.subject_attribution = [
+    ['memory-synthesis', [['invented-region', 0.8]]],
+  ];
+  assert.throws(() => validatePayload(unknownSubjectRegion), /subject_attribution contains an unknown region id/);
+
+  const missingSubjectAttribution = payload();
+  missingSubjectAttribution.nodes[0].synthesis.subject_attribution = [];
+  assert.throws(() => validatePayload(missingSubjectAttribution), /one ordered entry per subject/);
+
+  const unsortedSubjectRegions = payload();
+  unsortedSubjectRegions.synthesis.regions.push({ ...unsortedSubjectRegions.synthesis.regions[0],
+    id: 'context-bank' });
+  unsortedSubjectRegions.nodes[0].synthesis.subject_attribution = [
+    ['memory-synthesis', [['base-graph', 0.4], ['context-bank', 0.8]]],
+  ];
+  assert.throws(() => validatePayload(unsortedSubjectRegions), /sorted by score then id/);
+
   const badRegionHash = payload(); badRegionHash.synthesis.regions[0].source_snapshot_sha256 = 'abc';
   assert.throws(() => validatePayload(badRegionHash), /source_snapshot_sha256/);
 
@@ -242,6 +260,30 @@ test('screen overlap alone cannot merge semantically unrelated notes', () => {
   assert.notEqual(key(alikeA, 0), key(different, 2), 'different subjects stay separate');
   assert.notEqual(key(unlabelled, 3), key(unlabelled, 4), 'unlabelled nodes stay singletons');
   assert.notEqual(key(alikeA, 0), key(alikeB, 1, 5), 'different depth bands stay separate');
+});
+
+test('legacy ungrounded extraction words cannot name pools', () => {
+  const legacy = node('legacy', 'Legacy payload', [['through', 1]], []);
+  legacy.label_source = 'none';
+  legacy.topics = ['through']; legacy.display_tags = ['through'];
+  const controlled = node('controlled', 'Controlled facet', [['through', 1]], []);
+  controlled.label_source = 'none'; controlled.topics = ['through'];
+  controlled.display_tags = ['through']; controlled.facets = ['memory'];
+  const provider = node('provider', 'Provider projection', [['memory-synthesis', 1]], []);
+  provider.label_source = 'none'; provider.synthesis.region_attribution = [['context-bank', 1]];
+  provider.synthesis.subject_attribution = [['memory-synthesis', [['context-bank', 0.9]]]];
+  const nodeLevelOnly = node('node-level', 'Legacy node-level projection', [['subscriptions', 1]], []);
+  nodeLevelOnly.label_source = 'none'; nodeLevelOnly.synthesis.region_attribution = [['context-bank', 1]];
+  const opaque = node('opaque', 'Opaque token', [['ee5e29caf8e147a79a1868ec8e225fff', 1]], []);
+  const all = [legacy, controlled, provider, nodeLevelOnly, opaque,
+    ...Array.from({ length: 20 }, (_, index) => node(`ground-${index}`, `Ground ${index}`))];
+  const stats = buildLabelStats(all);
+  assert.equal(semanticPoolIdentity(legacy, stats, 1, 1, 0).semantic, null);
+  assert.equal(semanticPoolIdentity(controlled, stats, 1, 1, 1).semantic.key, 'memory');
+  assert.equal(semanticPoolIdentity(provider, stats, 1, 1, 2).semantic.key, 'memory synthesis');
+  assert.equal(semanticPoolIdentity(nodeLevelOnly, stats, 1, 1, 3).semantic, null,
+    'node-level bank participation cannot authorize an unrelated subject term');
+  assert.equal(semanticPoolIdentity(opaque, stats, 1, 1, 4).semantic, null);
 });
 
 test('navigation hubs retain all typed relations but visualize a deterministic bounded sample', () => {

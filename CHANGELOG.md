@@ -7,7 +7,8 @@ All notable changes to Aethergraph are documented here.
 Clarity, navigation, and public-directory release.
 
 - Pools dense nearby notes into soft semantic light regions while keeping crisp document representatives above them.
-- Replaces repeated structural labels with document-frequency-ranked subjects, topics, tags, and facets; deduplicates and collision-tests an adaptive 18–48 labels per viewport.
+- Raises distant-node and semantic-pool contrast so depth remains legible without the original ghosted haze.
+- Replaces repeated structural labels with document-frequency-ranked, grounded subjects, topics, tags, provider projections, and controlled facets; legacy ungrounded extraction words stay search-only. Labels are deduplicated and collision-tested within an adaptive 18–48 per viewport.
 - Preserves complete MOC/index collections while limiting visual Context and Archive spokes for structural hubs; Primary relations remain uncapped.
 - Reports semantic Primary, Context, and Archive tiers instead of calling every explicit storage row “direct.”
 - Makes card titles, paths, connection titles, double-clicked nodes, and optional heading/block fragments open exact safe vault targets.

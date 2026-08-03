@@ -10,6 +10,9 @@
   W! primary N! hub-cap
   W! hidden.visual relation -> browseable + searchable + exact-target-open
   W! label <- document-grounded subject|topic|tag|facet
+  W! legacy.label_source:none terms -> search-only ¬ label|pool
+  W! provider.subject -> label only-if term-level subject_attribution⊗non-base-region
+  N! node-level region_attribution ⇒ label-authority
   N! structural context|project|area -> topical cluster label
   W! normalized label <=1/frame unless pinned
   W! open.target := vault-relative markdown + optional heading|block fragment

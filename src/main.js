@@ -150,7 +150,9 @@ void main() {
   v_hue = i_hue; v_style = i_style; v_flags = i_flags;
   v_index = i_index;
   v_dim = nd.w;
-  v_fog = clamp(1.0 - (clip.w - u_fog.x) / max(u_fog.y, 1.0), 0.18, 1.0);
+  /* Keep depth readable without turning distant notes into ghosts. Perspective still lowers
+     salience, but the floor preserves a real silhouette on dark themes. */
+  v_fog = clamp(1.0 - (clip.w - u_fog.x) / max(u_fog.y, 1.0), 0.27, 1.0);
 }`;
 
 const NODE_FS = `#version 300 es
@@ -737,10 +739,53 @@ function validateScoredTerms(value, label) {
   }
 }
 
+function validateSubjectAttribution(value, subjects, label) {
+  if (!Array.isArray(value) || value.length !== subjects.length || value.length > 64) {
+    throw new Error(`${label} must contain one ordered entry per subject`);
+  }
+  for (let i = 0; i < value.length; i++) {
+    const entry = value[i];
+    if (!Array.isArray(entry) || entry.length !== 2 || !Array.isArray(entry[1])
+        || !entry[1].length || entry[1].length > 64) {
+      throw new Error(`${label}[${i}] must be [subject, [[region, score], ...]]`);
+    }
+    const term = boundedString(entry[0], `${label}[${i}][0]`, {
+      nonempty: true, safe: true, max: 128,
+    });
+    if (term !== subjects[i][0]) throw new Error(`${label} must follow subjects order exactly`);
+    const seenRegions = new Set();
+    let previous = null;
+    for (let j = 0; j < entry[1].length; j++) {
+      const pair = entry[1][j];
+      if (!Array.isArray(pair) || pair.length !== 2) {
+        throw new Error(`${label}[${i}][1][${j}] must be [region, score]`);
+      }
+      const region = boundedString(pair[0], `${label}[${i}][1][${j}][0]`, {
+        nonempty: true, safe: true, max: 128,
+      });
+      boundedNumber(pair[1], `${label}[${i}][1][${j}][1]`, 0, 1, false);
+      if (seenRegions.has(region)) throw new Error(`${label}[${i}] contains duplicate region ${region}`);
+      if (previous && (pair[1] > previous[1]
+          || (pair[1] === previous[1] && region.localeCompare(previous[0]) < 0))) {
+        throw new Error(`${label}[${i}] regions must be sorted by score then id`);
+      }
+      seenRegions.add(region);
+      previous = pair;
+    }
+  }
+}
+
 function validateNodeSynthesis(value, label) {
-  exactKeys(value, ['subjects', 'contexts', 'importance', 'utility', 'activation', 'confidence',
-    'support', 'region_attribution', 'residuals'], label);
+  const keys = ['subjects', 'contexts', 'importance', 'utility', 'activation', 'confidence',
+    'support', 'region_attribution', 'residuals'];
+  const hasSubjectAttribution = Object.prototype.hasOwnProperty.call(value, 'subject_attribution');
+  if (hasSubjectAttribution) keys.push('subject_attribution');
+  exactKeys(value, keys, label);
   validateScoredTerms(value.subjects, `${label}.subjects`);
+  if (hasSubjectAttribution) {
+    validateSubjectAttribution(value.subject_attribution, value.subjects,
+      `${label}.subject_attribution`);
+  }
   validateScoredTerms(value.contexts, `${label}.contexts`);
   validateScoredTerms(value.region_attribution, `${label}.region_attribution`);
   exactKeys(value.importance, ['score', 'parts'], `${label}.importance`);
@@ -851,6 +896,13 @@ function validateTopSynthesis(value, nodeIds, nodes) {
     for (const pair of nodes[i].synthesis.region_attribution) {
       if (!regionIds.has(pair[0])) {
         throw new Error(`node ${i}.synthesis.region_attribution contains an unknown region id`);
+      }
+    }
+    for (const entry of nodes[i].synthesis.subject_attribution || []) {
+      for (const pair of entry[1]) {
+        if (!regionIds.has(pair[0])) {
+          throw new Error(`node ${i}.synthesis.subject_attribution contains an unknown region id`);
+        }
       }
     }
   }
@@ -1343,7 +1395,29 @@ function scoredTermNames(value) {
   }
   return out;
 }
-function nodeSubjects(d) { return scoredTermNames(d && d.synthesis && d.synthesis.subjects); }
+const UNGROUNDED_LABEL_SOURCES = new Set(['', 'none', 'unknown', 'path', 'agent safe topics']);
+function hasGroundedLabelSource(d) {
+  return !UNGROUNDED_LABEL_SOURCES.has(normalizedLabel(d && d.label_source));
+}
+function providerAttributedSubjectKeys(d) {
+  const attribution = d && d.synthesis && d.synthesis.subject_attribution;
+  const out = new Set();
+  if (!Array.isArray(attribution)) return out;
+  for (const entry of attribution) {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) continue;
+    if (entry[1].some(pair => Array.isArray(pair) && typeof pair[0] === 'string'
+        && pair[0] !== 'base-graph' && Number(pair[1]) > 0)) {
+      out.add(normalizedLabel(entry[0]));
+    }
+  }
+  return out;
+}
+function nodeSubjects(d) {
+  const subjects = scoredTermNames(d && d.synthesis && d.synthesis.subjects);
+  if (hasGroundedLabelSource(d)) return subjects;
+  const projected = providerAttributedSubjectKeys(d);
+  return subjects.filter(term => projected.has(normalizedLabel(term)));
+}
 function nodeContexts(d) { return scoredTermNames(d && d.synthesis && d.synthesis.contexts); }
 
 function normalizedLabel(value) {
@@ -1364,10 +1438,11 @@ const GENERIC_LABELS = new Set([
 ]);
 
 function nodeSemanticLabels(d) {
+  const grounded = hasGroundedLabelSource(d);
   return [
     ...nodeSubjects(d).map(label => ({ label, source: 'subject' })),
-    ...nodeTopics(d).map(label => ({ label, source: 'topic' })),
-    ...nodeDisplayTags(d).map(label => ({ label, source: 'tag' })),
+    ...(grounded ? nodeTopics(d).map(label => ({ label, source: 'topic' })) : []),
+    ...(grounded ? nodeDisplayTags(d).map(label => ({ label, source: 'tag' })) : []),
     ...termNames(d && d.facets).map(label => ({ label, source: 'facet' })),
   ];
 }
@@ -1390,6 +1465,8 @@ function buildLabelStats(nodes) {
 function labelCandidateScore(label, count, clusterSize, source, stats) {
   const key = normalizedLabel(label);
   if (!key || GENERIC_LABELS.has(key) || key.length < 3) return -Infinity;
+  const compact = key.replace(/\s+/g, '');
+  if (/^[a-f0-9]{20,}$/i.test(compact) || (!key.includes(' ') && key.length > 28)) return -Infinity;
   const df = stats.documentFrequency.get(key) || 1;
   const frequency = df / stats.total;
   if (frequency > 0.20) return -Infinity;
@@ -2357,7 +2434,7 @@ class AetherView extends ItemView {
       /* base alpha folds in the age fade, so opacity stays a real channel with zero cost */
       const recallAlpha = N[i].recall && recallPeak > 0
         ? 0.35 + 0.65 * clamp(N[i].recall.activation / recallPeak, 0, 1) : 1;
-      a.style[i * 4 + 3] = clamp(0.42 + (d.standing || 0) * 0.58, 0.36, 0.96)
+      a.style[i * 4 + 3] = clamp(0.50 + (d.standing || 0) * 0.48, 0.46, 0.98)
                          * (1 - (d.age === undefined ? 0.4 : d.age) * 0.24) * recallAlpha;
       a.flags[i * 4 + 0] = d.authority_rank === undefined ? 2 : d.authority_rank;
       a.flags[i * 4 + 1] = PRIVACY_CODE[d.privacy] === undefined ? 0 : PRIVACY_CODE[d.privacy];
@@ -2992,8 +3069,9 @@ class AetherView extends ItemView {
       chips('subjects', nodeSubjects(d).slice(0, 4));
       chips('contexts', nodeContexts(d).slice(0, 4));
     }
-    const terms = nodeDisplayTags(d).length ? nodeDisplayTags(d).slice(0, 3)
-      : nodeTopics(d).length ? nodeTopics(d).slice(0, 3) : (d.facets || []).slice(0, 3);
+    const grounded = hasGroundedLabelSource(d);
+    const terms = grounded && nodeDisplayTags(d).length ? nodeDisplayTags(d).slice(0, 3)
+      : grounded && nodeTopics(d).length ? nodeTopics(d).slice(0, 3) : (d.facets || []).slice(0, 3);
     chips(synthesis ? 'document labels' : null, terms);
     if (d.privacy && d.privacy !== 'agent-safe') {
       card.createDiv({ cls: 'ag-tip-priv', text: d.privacy });
@@ -3053,8 +3131,9 @@ class AetherView extends ItemView {
     const subjects = nodeSubjects(d).slice(0, 3), contexts = nodeContexts(d).slice(0, 3);
     if (subjects.length) this.tip.createDiv({ cls: 'ag-tip-facets', text: `subjects: ${subjects.join(' · ')}` });
     if (contexts.length) this.tip.createDiv({ cls: 'ag-tip-contexts', text: `contexts: ${contexts.join(' · ')}` });
-    const terms = nodeDisplayTags(d).length ? nodeDisplayTags(d).slice(0, 3)
-      : nodeTopics(d).length ? nodeTopics(d).slice(0, 3) : (d.facets || []).slice(0, 3);
+    const grounded = hasGroundedLabelSource(d);
+    const terms = grounded && nodeDisplayTags(d).length ? nodeDisplayTags(d).slice(0, 3)
+      : grounded && nodeTopics(d).length ? nodeTopics(d).slice(0, 3) : (d.facets || []).slice(0, 3);
     if (terms.length) this.tip.createDiv({ cls: 'ag-tip-facets', text: terms.join(' · ') });
     if (d.synthesis) {
       const sy = d.synthesis, dynamic = best.recall || null, regions = regionSummary(this.data.synthesis);
@@ -3304,12 +3383,12 @@ class AetherView extends ItemView {
       const rx = clamp(32 + Math.sqrt(Math.log2(c.n + 1)) * 24, 36, 92);
       const ry = clamp(rx * 0.56, 24, 56);
       const hue = (Math.atan2(c.hueY, c.hueX) * 180 / Math.PI + 360) % 360;
-      const alpha = clamp(0.028 + Math.log2(c.n + 1) * 0.015, 0.04, 0.13)
+      const alpha = clamp(0.040 + Math.log2(c.n + 1) * 0.020, 0.055, 0.18)
         * clamp(c.a / c.n, 0.35, 1);
       ctx.save(); ctx.translate(x, y); ctx.scale(rx, ry);
       const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
       glow.addColorStop(0, `hsla(${hue},78%,66%,${alpha})`);
-      glow.addColorStop(0.42, `hsla(${hue},70%,56%,${alpha * 0.55})`);
+      glow.addColorStop(0.42, `hsla(${hue},70%,56%,${alpha * 0.65})`);
       glow.addColorStop(1, `hsla(${hue},62%,46%,0)`);
       ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
@@ -3654,7 +3733,8 @@ module.exports.__sanitize = sanitize;
 module.exports.__defaults = DEFAULTS;
 module.exports.__tables = { LAYOUTS, TIERS, ANGLE_MODES, DENSITY, CONNECTION_MODES };
 module.exports.__relations = { EDGE, edgePresentation, edgeVisible, displayTitle, termNames, nodeTopics,
-  nodeDisplayTags, nodeSubjects, nodeContexts, normalizedLabel, humanLabel, buildLabelStats,
+  nodeDisplayTags, nodeSubjects, nodeContexts, hasGroundedLabelSource, providerAttributedSubjectKeys,
+  normalizedLabel, humanLabel, buildLabelStats,
   labelCandidateScore, chooseClusterLabel, bestNodeSemanticLabel, semanticPoolIdentity,
   titleCounts, disambiguatedTitle, safeNoteTarget,
   semanticOverlap, edgeRelevance, isNavigationScaffold, selectRenderableEdges, clipLabel, vocabLabel };
