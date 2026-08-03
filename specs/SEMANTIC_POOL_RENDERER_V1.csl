@@ -1,0 +1,73 @@
+# § Aethergraph semantic-pool renderer v1
+
+§S state := implemented-candidate @ 0.3.0
+§I objective := graph.(typed-complete) + view.(bounded+legible+actionable)
+
+§I invariants
+  W! payload.relation ≠ canvas.primitive
+  W! typed-count = source-truth-within-loaded-payload
+  W! visual-budget N! delete|retype relation
+  W! primary N! hub-cap
+  W! hidden.visual relation -> browseable + searchable + exact-target-open
+  W! label <- document-grounded subject|topic|tag|facet
+  W! legacy.label_source:none terms -> search-only ¬ label|pool
+  W! provider.subject -> label only-if term-level subject_attribution⊗non-base-region
+  N! node-level region_attribution ⇒ label-authority
+  N! structural context|project|area -> topical cluster label
+  W! normalized label <=1/frame unless pinned
+  W! open.target := vault-relative markdown + optional heading|block fragment
+  N! absolute-path|parent-traversal|missing-file -> open
+  W! provider/memory framing remains typed estimate ¬ truth|consent|authority
+
+§I visual planner
+  structural_navigation := reason ∋ [MOC|structural-navigation|index-navigation]
+  hub_cap.context := 24
+  hub_cap.archive := 12
+  hub_cap.primary := ∞
+  selection.order := presentation > relevance > semantic-overlap > importance > stable-endpoints
+  label_budget := clamp(floor(viewport.area/50000),18,48)
+  label_score := coverage * idf(visible-corpus) * source-prior * specificity
+  label.source-prior := subject:1 | topic:.90 | tag:.78 | facet:.72
+  pool.cell := 210px×82px
+  pool.identity := screen-cell + depth-band + strongest-specific-semantic-label
+  N! screen-overlap-alone -> pooled-relatedness
+  pool.unlabelled := singleton
+  pool.max-per-frame := 40
+  pool.alpha := clamp(.028+log2(count+1)*.015,.04,.13)
+  focus.background-alpha := .16
+  node.base-alpha := clamp(.42+.58*standing,.36,.96) * age-fade(.24)
+  facet-gap.unknown := style-descriptor ¬ suppression ; edge-alpha-factor=.72
+
+§I navigation
+  node.click := focus
+  node.double-click|mod-click := open-current
+  card.title|card.path|connection.title := open-exact
+  connection.focus := graph-focus
+  browse-all := filter(all-typed) + incremental-page(60)
+
+§I privacy + distribution
+  N! network-client
+  N! client-telemetry
+  N! persistent-diagnostic-sink
+  health-check := on-demand + transient-notice + no-write
+  repository N! tracked main.js
+  release.asset := minified-build(src/main.js) + manifest.json + styles.css
+
+§T acceptance
+  ✓ synthetic hub degree=1200 -> context.visualized=24 + typed=1200 retained
+  ✓ synthetic aggregate probe -> 5400 typed -> bounded projection ; N! source content retained
+  ✓ broad repeated term frequency>.20 -> rejected label
+  ✓ duplicate display-title -> shortest-unique-path-suffix
+  ✓ safe fragment target preserved ; absolute|traversal target rejected
+  ✓ automated suite=green @ implementation checkpoint
+  ○ Obsidian visual QA pending runtime reload
+  ○ community-directory review pending external submission
+
+§R rollback
+  renderer+synthesis change isolated @ release commit
+  payload bytes remain compatible
+  typed relations remain complete
+  prior release assets recoverable @ tag 0.2.0
+
+§attestation
+  "There was no hurt nor harm in the making of this, to anyone, anything, or anybody."

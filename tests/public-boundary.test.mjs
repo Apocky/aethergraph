@@ -33,6 +33,8 @@ test("scanner recognizes high-risk material without a live example in the reposi
   assert.match(scanText("sample.txt", githubToken).join("\n"), /GitHub access token/);
   assert.match(scanText("sample.txt", privateKeyHeader).join("\n"), /private-key material/);
   assert.match(scanText("sample.txt", ["vault", "sync"].join("")).join("\n"), /private generator/);
+  assert.match(scanText("sample.txt", ["03", "research", "ai", "conversations"].join("-")).join("\n"),
+    /private corpus/);
   assert.match(scanText("main.js", `${["fet", "ch"].join("")}(url)`).join("\n"), /network fetch/);
 });
 

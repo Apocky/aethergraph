@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest 0.2.x beta release.
+Security fixes are provided for the latest 0.3.x release.
 
 ## Reporting a vulnerability
 
@@ -23,7 +23,7 @@ asserted verified evidence is downgraded to reported evidence. A rejected source
 provider influence, remains visible as a degraded receipt, and cannot erase independently valid
 sources.
 
-Renderer input is capped at 64 MiB. Each projection source is capped at 1 MiB; one synthesis run
+Renderer input is capped at 128 MiB. Each projection source is capped at 1 MiB; one synthesis run
 accepts at most 32 sources and 4,096 contributions per source. Base-graph and agent-index inputs
 are bounded and hashed without being copied into the output. The CLI rejects duplicate output
 paths and input/output aliases after lexical path resolution; it does not resolve filesystem-link
@@ -31,5 +31,5 @@ aliases. Each output is written through an exclusively created temporary file, s
 Temporary-file mode is `0600` where the platform honors POSIX modes.
 
 The Obsidian runtime never opens a memory store, holds a provider credential, or performs a
-network request. Active-recall query text remains transient and is not written to settings,
-payloads, or diagnostics.
+network request. Active-recall query text remains transient and is not written to settings or
+payloads. The runtime contains no client telemetry or persistent diagnostic sink.

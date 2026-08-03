@@ -1,6 +1,6 @@
 # Privacy
 
-Aethergraph is local-first. The distributed plugin contains no vault, graph payload, user configuration, or diagnostic state.
+Aethergraph is local-first. The distributed plugin contains no vault, graph payload, user configuration, or usage state.
 
 ## What the plugin reads
 
@@ -12,17 +12,16 @@ schemas, and invented fixtures. They do not contain projection files or generate
 
 ## Network behavior
 
-Aethergraph does not send analytics or diagnostic data to a remote service. It does not require an account.
+Aethergraph does not make network requests, send analytics, collect client telemetry, or require an account.
 
 The plugin contains no network client. Task-conditioned recall is computed locally from the
-loaded graph and the text currently typed into the local filter. Filter text is not persisted
-in the payload or diagnostic stream.
+loaded graph and the text currently typed into the local filter. Filter text is not persisted.
 
-## Diagnostics
+## On-demand health check
 
-Diagnostics are disabled by default. When a user explicitly enables them, Aethergraph retains only a bounded local diagnostic stream. Diagnostic references are salted locally; note bodies, titles, tags, and source paths are not diagnostic fields. Nodes marked `withhold_from_telemetry`, and nodes with missing or unrecognized privacy metadata, receive no stable diagnostic reference.
+The **Check graph health** command reads the current renderer and payload state only when invoked, shows a transient Obsidian notice, and does not retain or write an event stream. The legacy `withhold_from_telemetry` field remains in the data contract for compatibility and is treated as an additional machine-export exclusion; it does not activate any telemetry behavior.
 
-Disabling diagnostics stops new collection and clears retained diagnostic events, frame samples, errors, and identity references. Removing the plugin directory removes the distributed code; remove the plugin's local settings through Obsidian if you also want to clear its local configuration.
+Removing the plugin directory removes the distributed code; remove the plugin's local settings through Obsidian if you also want to clear its view preferences.
 
 ## Sharing and exports
 

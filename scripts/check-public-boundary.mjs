@@ -84,12 +84,14 @@ const REQUIRED_REPOSITORY_FILES = Object.freeze([
   "versions.json",
   "package.json",
   "package-lock.json",
+  "src/main.js",
   "schemas/aethergraph-v3.schema.json",
   "schemas/aethergraph-v4.schema.json",
   "schemas/aethergraph-projection-source-v1.schema.json",
   "schemas/aethergraph-ai-v1.schema.json",
   "schemas/aethergraph-ai-compact-v1.schema.json",
   "specs/HOLISTIC_MEMORY_SYNTHESIS_ORGAN_V1.csl",
+  "specs/SEMANTIC_POOL_RENDERER_V1.csl",
   "tools/synthesis-core.mjs",
   "tools/synthesize.mjs",
   "tests/fixtures/aethergraph-v3.synthetic.json",
@@ -160,6 +162,7 @@ export function scanText(relativePath, text) {
     ["private source-mirror folder", ["98", "Source", "Mirrors"].join("\\s+")],
     ["private generator name", ["vault", "sync"].join("")],
     ["private corpus identifier", ["T", "97"].join("")],
+    ["private corpus identifier", ["03", "research", "ai", "conversations"].join("[-_\\s]+")],
     ["private memory-bank name", ["Mem", "Palace"].join("")],
     ["private memory-bank name", ["Brain", "monsoon"].join("")],
     ["private memory-bank name", ["Ana", "mnesis"].join("")]
@@ -167,7 +170,7 @@ export function scanText(relativePath, text) {
   for (const [label, source] of internalTokens) {
     if (new RegExp(`\\b${source}\\b`, "i").test(text)) findings.push(`${relativePath}: ${label}`);
   }
-  if (relativePath === "main.js" || relativePath.startsWith("tools/")) {
+  if (relativePath === "main.js" || relativePath === "src/main.js" || relativePath.startsWith("tools/")) {
     const runtimeRules = [
       ["network fetch primitive", new RegExp(`\\b${["fet", "ch"].join("")}\\s*\\(`)],
       ["XML HTTP primitive", new RegExp(`\\b${["XML", "HttpRequest"].join("")}\\b`)],
@@ -302,8 +305,8 @@ export function validateGraph(graph, label = SYNTHETIC_FIXTURE) {
 function validateManifest(manifest) {
   const findings = [];
   if (manifest.id !== "aethergraph") findings.push("manifest.json: id must be aethergraph");
-  if (manifest.version !== "0.2.0") findings.push("manifest.json: public beta version must be 0.2.0");
-  if (manifest.isDesktopOnly !== true) findings.push("manifest.json: beta must remain desktop-only");
+  if (manifest.version !== "0.3.0") findings.push("manifest.json: public release version must be 0.3.0");
+  if (manifest.isDesktopOnly !== true) findings.push("manifest.json: current release must remain desktop-only");
   if (typeof manifest.minAppVersion !== "string" || !manifest.minAppVersion) findings.push("manifest.json: minAppVersion is required");
   return findings;
 }
@@ -395,7 +398,7 @@ export async function runBoundaryChecks({ root = ROOT, release = false } = {}) {
     if (manifest && versionsFile) {
       const versions = await readJson(versionsFile.absolute, versionsFile.relative, findings);
       if (versions?.[manifest.version] !== manifest.minAppVersion) {
-        findings.push("versions.json: beta version must map to manifest minAppVersion");
+        findings.push("versions.json: current version must map to manifest minAppVersion");
       }
     }
   }

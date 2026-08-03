@@ -70,6 +70,66 @@ test("legacy basic UTC offsets are canonicalized at the v4 boundary", async () =
   assert.equal(output.synthesis.regions[0].observed_at, "2026-08-02T19:08:33Z");
 });
 
+test("ungrounded base topics remain search labels and do not become synthesized subjects", async () => {
+  const graph = await fixture("aethergraph-v3.synthetic.json");
+  const target = graph.nodes.find((node) => node.id === "synthetic-focus");
+  target.label_source = "none";
+  target.topics = ["ungrounded-list-vocabulary"];
+  target.facets = ["declared-facet"];
+  const output = synthesizeGraph(synthesisOptions(graph, []));
+  const node = output.nodes.find((item) => item.id === "synthetic-focus");
+  const subjects = new Set(node.synthesis.subjects.map(([term]) => term));
+  assert.equal(subjects.has("ungrounded-list-vocabulary"), false);
+  assert.equal(subjects.has("declared-facet"), true);
+  assert.deepEqual(node.topics, ["ungrounded-list-vocabulary"],
+    "the source label remains available for local search and inspection");
+  assert.deepEqual(node.synthesis.subject_attribution.map(([term]) => term),
+    node.synthesis.subjects.map(([term]) => term));
+  assert.equal(node.synthesis.subject_attribution.some(([term]) => term === "ungrounded-list-vocabulary"), false);
+  assert.deepEqual(node.synthesis.subject_attribution.find(([term]) => term === "declared-facet"),
+    ["declared-facet", [["base-graph", 0.55]]]);
+});
+
+test("subject attribution is term-exact, region-specific, and deterministically ordered", async () => {
+  const graph = await fixture("aethergraph-v3.synthetic.json");
+  const template = await fixture("projection-source-v1.synthetic.json");
+  const providerA = structuredClone(template);
+  providerA.provider_id = "region-a";
+  providerA.derivation_family = "family-a";
+  providerA.source_snapshot_sha256 = "3".repeat(64);
+  providerA.contributions = [structuredClone(template.contributions[0])];
+  providerA.contributions[0].id = "region-a-node";
+  providerA.contributions[0].subjects = [["graph", 1], ["graph-structure", 0.92]];
+  providerA.contributions[0].lineage_ids = ["4".repeat(64)];
+  const providerB = structuredClone(providerA);
+  providerB.provider_id = "region-b";
+  providerB.derivation_family = "family-b";
+  providerB.source_snapshot_sha256 = "5".repeat(64);
+  providerB.contributions[0].id = "region-b-node";
+  providerB.contributions[0].subjects = [["graph", 0.5]];
+  providerB.contributions[0].lineage_ids = ["6".repeat(64)];
+
+  const first = synthesizeGraph(synthesisOptions(graph, [providerB, providerA]));
+  const second = synthesizeGraph(synthesisOptions(graph, [providerA, providerB]));
+  const firstNode = first.nodes.find((item) => item.id === "synthetic-focus");
+  const secondNode = second.nodes.find((item) => item.id === "synthetic-focus");
+  const attribution = firstNode.synthesis.subject_attribution;
+
+  assert.deepEqual(attribution, secondNode.synthesis.subject_attribution,
+    "provider input order cannot change term provenance");
+  assert.deepEqual(attribution.map(([term]) => term),
+    firstNode.synthesis.subjects.map(([term]) => term),
+    "every final subject has exactly one attribution entry in subject order");
+  assert.equal(attribution.every(([, regions]) => regions.length > 0
+    && regions.every(([id, value]) => typeof id === "string" && value >= 0 && value <= 1)), true);
+  const graphRegions = attribution.find(([term]) => term === "graph")[1];
+  assert.deepEqual(graphRegions.map(([id]) => id), ["base-graph", "region-a", "region-b"]);
+  assert.equal(graphRegions.every((entry, index) => index === 0
+    || graphRegions[index - 1][1] >= entry[1]), true);
+  assert.deepEqual(attribution.find(([term]) => term === "graph-structure")[1]
+    .map(([id]) => id), ["region-a"]);
+});
+
 test("malformed, stale, and private-target providers are isolated as degraded regions", async () => {
   const graph = await fixture("aethergraph-v3.synthetic.json");
   const template = await fixture("projection-source-v1.synthetic.json");
@@ -139,6 +199,9 @@ test("AI projection excludes non-agent-safe nodes and compact coding round-trips
   assert.equal(decoded.nodes.every((node) => node.privacy === "agent-safe"), true);
   assert.deepEqual(decoded.synthesis.regions, output.synthesis.regions);
   assert.deepEqual(decoded.synthesis.residuals, output.synthesis.residuals);
+  assert.deepEqual(decoded.nodes[0].synthesis.subject_attribution,
+    output.nodes.find((node) => node.id === decoded.nodes[0].id).synthesis.subject_attribution,
+    "rich and compact AI records retain term-level provenance");
   assert.doesNotMatch(ai, /synthetic-archive|Historical graph sketch/);
   assert.equal(decodeCompactJsonl(compact), ai);
 });
@@ -196,6 +259,11 @@ test("all public synthesis schemas parse and carry draft 2020-12 identifiers", a
     assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
     assert.match(schema.$id, /^https:\/\/github\.com\/Apocky\/aethergraph\//);
   }
+  const v4 = JSON.parse(await readFile(path.join(ROOT, "schemas", "aethergraph-v4.schema.json"), "utf8"));
+  assert.equal(v4.$defs.nodeSynthesis.required.includes("subject_attribution"), false,
+    "legacy v4 payloads remain valid when term-level provenance is absent");
+  assert.equal(v4.$defs.nodeSynthesis.properties.subject_attribution.items.prefixItems[1].minItems, 1,
+    "present term-level provenance cannot contain an unattributed subject");
 });
 
 test("checked-in v4 and AI fixtures are exact deterministic encodings", async () => {

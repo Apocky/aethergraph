@@ -37,6 +37,7 @@
     "stringArray": { "type": "array", "items": { "type": "string" } },
     "nullableString": { "type": ["string", "null"] },
     "score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "slug": { "type": "string", "maxLength": 128, "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*$" },
     "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "pair": {
       "type": "array", "minItems": 2, "maxItems": 2,
@@ -114,6 +115,22 @@
       "required": ["subjects", "contexts", "importance", "utility", "activation", "confidence", "support", "residuals", "region_attribution"],
       "properties": {
         "subjects": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/pair" } },
+        "subject_attribution": {
+          "type": "array", "maxItems": 12, "uniqueItems": true,
+          "items": {
+            "type": "array", "minItems": 2, "maxItems": 2, "items": false,
+            "prefixItems": [
+              { "$ref": "#/$defs/slug" },
+              {
+                "type": "array", "minItems": 1, "uniqueItems": true,
+                "items": {
+                  "type": "array", "minItems": 2, "maxItems": 2, "items": false,
+                  "prefixItems": [{ "$ref": "#/$defs/slug" }, { "$ref": "#/$defs/score" }]
+                }
+              }
+            ]
+          }
+        },
         "contexts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/pair" } },
         "importance": {
           "type": "object", "additionalProperties": false, "required": ["score", "parts"],
