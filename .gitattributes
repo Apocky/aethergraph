@@ -1,0 +1,2 @@
+# Aethergraph's line-delimited projections are deterministic byte encodings.
+*.jsonl text eol=lf
